@@ -597,18 +597,7 @@ do {
         }
         let action = args[1]
         let key = args[2]
-        let timingKeys: Set<String> = [
-            "timing.virtualDisplayEnumerationWaitSeconds",
-            "timing.virtualDisplayReportedIDExtraWaitSeconds",
-            "timing.softDisconnectDisappearWaitSeconds",
-            "timing.restoreBuiltInShortWaitSeconds",
-            "timing.restorePhysicalDisplayWaitSeconds",
-            "timing.restorePhysicalDisplayGraceSeconds",
-            "timing.restorePhysicalDisplayGracePollIntervalMilliseconds",
-            "timing.restoreCooldownSeconds",
-            "timing.restoreCooldownAfterPausedSeconds",
-            "timing.restorePostPromoteStabilizationMilliseconds"
-        ]
+        let timingKeys = Set(TimingConfig.supportedKeys.map { "timing.\($0)" })
         guard key == "resolution"
             || key == "scale-mode"
             || key == "virtual-display-policy"

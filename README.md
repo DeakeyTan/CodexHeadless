@@ -70,7 +70,7 @@ The current implementation targets the PRD's v0.5 path:
    - Virtual Display Policy: `auto`
    - Soft Disconnect: `on`
    - Touch Bar Hide: `on`
-   - Keep Awake on Launch: `off`
+   - Keep Awake Lifecycle: `enable/off`
    - Keep Awake Backend: `caffeinate`
    - Restore Physical Wait: `5s`
    - Restore Grace: `5s`
@@ -310,7 +310,7 @@ codex-headless doctor
 
 默认后端是 macOS 自带的 `/usr/bin/caffeinate`，适合 CLI 和 SSH 场景，因为 CLI 退出后 `caffeinate` 进程仍可继续保持系统唤醒。
 
-默认配置中 `keepAwakeOnLaunch=false`。单纯打开菜单栏 App 不会防休眠；`Enable Headless Mode` 会开启 Keep Awake，`Restore Normal Mode` / `codex-headless off` 会关闭本工具管理的 Keep Awake。
+单纯打开菜单栏 App 不会防休眠；`Enable Headless Mode` 会开启 Keep Awake，`Restore Normal Mode` / `codex-headless off` 会关闭本工具管理的 Keep Awake。
 
 也预留了 App 内原生 IOKit power assertion 后端：
 

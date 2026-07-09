@@ -258,6 +258,19 @@ public struct ConfirmDialogConfig: Codable {
 }
 
 public struct TimingConfig: Codable {
+    public static let supportedKeys: Set<String> = [
+        "virtualDisplayEnumerationWaitSeconds",
+        "virtualDisplayReportedIDExtraWaitSeconds",
+        "softDisconnectDisappearWaitSeconds",
+        "restoreBuiltInShortWaitSeconds",
+        "restorePhysicalDisplayWaitSeconds",
+        "restorePhysicalDisplayGraceSeconds",
+        "restorePhysicalDisplayGracePollIntervalMilliseconds",
+        "restoreCooldownSeconds",
+        "restoreCooldownAfterPausedSeconds",
+        "restorePostPromoteStabilizationMilliseconds"
+    ]
+
     public var virtualDisplayEnumerationWaitSeconds: Int
     public var virtualDisplayReportedIDExtraWaitSeconds: Int
     public var softDisconnectDisappearWaitSeconds: Int
@@ -296,7 +309,6 @@ public struct TimingConfig: Codable {
 }
 
 public struct AppConfig: Codable {
-    public var keepAwakeOnLaunch: Bool
     public var startAtLogin: Bool
     public var virtualDisplay: VirtualDisplayConfig
     public var rollback: RollbackConfig
@@ -321,7 +333,6 @@ public struct AppConfig: Codable {
     }
 
     public static let `default` = AppConfig(
-        keepAwakeOnLaunch: false,
         startAtLogin: false,
         virtualDisplay: .default,
         rollback: .default,
