@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          swift build --build-system native -c release
+
+      - name: Prepare dist
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIST="dist/CodexHeadless-v$VERSION"
+          mkdir -p "$DIST"
+
+          # 按你的实际构建产物路径调整
+          cp -R ".build/release/CodexHeadless.app" "$DIST/" || true
+          cp ".build/release/codex-headless" "$DIST/" || true
+          cp README.md "$DIST/" || true
+
+          if [ -d scripts ]; then
+            cp -R scripts "$DIST/"
+          fi
+
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "CodexHeadless-v$VERSION" "CodexHeadless-v$VERSION-macOS.zip"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/CodexHeadless-v$VERSION-macOS.zip" \
+            --title "CodexHeadless $GITHUB_REF_NAME" \
+            --notes "Automated release build for CodexHeadless." \
+            --prerelease
