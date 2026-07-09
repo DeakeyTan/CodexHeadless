@@ -429,7 +429,7 @@ CODEX_HEADLESS_SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
 ./scripts/install.sh
 ```
 
-朋友机器构建失败时，先收集这些信息：
+其他机器构建失败时，先收集这些信息：
 
 ```bash
 sw_vers
@@ -459,7 +459,7 @@ CODEX_HEADLESS_SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
 ./scripts/install.sh
 ```
 
-When a friend's machine fails to build, collect:
+When another machine fails to build, collect:
 
 ```bash
 sw_vers
