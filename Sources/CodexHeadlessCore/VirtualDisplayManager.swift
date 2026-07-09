@@ -257,6 +257,10 @@ public final class VirtualDisplayManager {
             }
             Thread.sleep(forTimeInterval: 0.15)
         }
+        if let reportedDisplayID {
+            logger.info("Virtual display host reported displayID=\(reportedDisplayID); accepting reported ID for promotion attempt.")
+            return reportedDisplayID
+        }
         return nil
     }
 

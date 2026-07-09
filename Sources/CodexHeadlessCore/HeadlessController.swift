@@ -80,15 +80,11 @@ public final class HeadlessController {
         var promotedExternal = false
         var virtualDisplayID: UInt32?
         if virtualDisplayPolicy == .always {
-            virtualDisplayID = try virtualDisplayManager.createVirtualDisplay(
-                resolution: resolution,
-                refreshRate: config.virtualDisplay.refreshRate,
-                scaleMode: config.virtualDisplay.scaleMode
-            )
+            virtualDisplayID = try createSoftwareVirtualDisplay(resolution: resolution, config: config)
             if let existingExternalDisplayID {
                 promotedExternal = try displayManager.setMainDisplay(id: existingExternalDisplayID, reason: "existing external/dummy display")
             } else if let virtualDisplayID {
-                promotedExternal = try displayManager.setMainDisplay(id: virtualDisplayID, reason: "software virtual display")
+                promotedExternal = promoteSoftwareVirtualDisplay(id: virtualDisplayID, resolution: resolution)
             }
             if !promotedExternal && hasExternal {
                 logger.warn("Software virtual display was not promoted; falling back to existing external/dummy display.")
@@ -97,13 +93,9 @@ public final class HeadlessController {
         } else if hasExternal {
             promotedExternal = try displayManager.setMainDisplayToPreferredExternal()
         } else if virtualDisplayPolicy == .auto {
-            virtualDisplayID = try virtualDisplayManager.createVirtualDisplay(
-                resolution: resolution,
-                refreshRate: config.virtualDisplay.refreshRate,
-                scaleMode: config.virtualDisplay.scaleMode
-            )
+            virtualDisplayID = try createSoftwareVirtualDisplay(resolution: resolution, config: config)
             if let virtualDisplayID {
-                promotedExternal = try displayManager.setMainDisplay(id: virtualDisplayID, reason: "software virtual display")
+                promotedExternal = promoteSoftwareVirtualDisplay(id: virtualDisplayID, resolution: resolution)
             }
         } else {
             logger.info("Software virtual display policy is off; no virtual display will be created.")
@@ -112,26 +104,7 @@ public final class HeadlessController {
         if !hasExternal && !promotedExternal {
             let message = "No alternative display is active. Software virtual display did not become visible, so Headless Mode was not started."
             logger.error(message)
-            virtualDisplayManager.destroyVirtualDisplayIfManaged()
-            sleepManager.disableKeepAwake()
-            stateStore.update { cleanState in
-                cleanState.mode = .normal
-                cleanState.keepAwake = false
-                cleanState.caffeinatePID = nil
-                cleanState.rollbackDeadline = nil
-                cleanState.rollbackConfirmed = true
-                cleanState.lastError = message
-                cleanState.activeResolutionOverride = nil
-                cleanState.virtualDisplayCreated = false
-                cleanState.virtualDisplayPID = nil
-                cleanState.virtualDisplayID = nil
-                cleanState.virtualDisplayRequestedResolution = nil
-                cleanState.virtualDisplayRefreshRate = nil
-                cleanState.virtualDisplayScaleMode = nil
-                cleanState.externalDisplayPromoted = false
-                cleanState.keepAwakeBackend = nil
-                cleanState.restoreCooldownUntil = Date().addingTimeInterval(20)
-            }
+            cleanFailedEnable(message: message)
             throw NSError(domain: "CodexHeadless.VirtualDisplayUnavailable", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: message
             ])
@@ -279,6 +252,22 @@ public final class HeadlessController {
             return
         }
 
+        finishRestoreAfterPhysicalDisplayAvailable(state: state)
+    }
+
+    public func continuePausedRestoreIfReady() {
+        let state = stateStore.load()
+        guard state.mode == .error,
+              state.lastError == "Restore paused because no built-in or external display is available.",
+              displayManager.restorePriorityDisplay(managedVirtualDisplayID: state.virtualDisplayID) != nil else {
+            return
+        }
+
+        logger.info("Continuing paused restore after built-in or external display became available.")
+        finishRestoreAfterPhysicalDisplayAvailable(state: state)
+    }
+
+    private func finishRestoreAfterPhysicalDisplayAvailable(state: RuntimeState) {
         do {
             try displayManager.setMainDisplayToRestorePriority(managedVirtualDisplayID: state.virtualDisplayID)
         } catch {
@@ -290,32 +279,7 @@ public final class HeadlessController {
         let cooldownUntil = Date().addingTimeInterval(20)
 
         stateStore.update { newState in
-            newState.mode = .normal
-            newState.keepAwake = false
-            newState.caffeinatePID = nil
-            newState.rollbackDeadline = nil
-            newState.rollbackConfirmed = true
-            newState.lastError = nil
-            newState.originalBrightness = nil
-            newState.activeResolutionOverride = nil
-            newState.virtualDisplayCreated = false
-            newState.virtualDisplayPID = nil
-            newState.virtualDisplayID = nil
-            newState.virtualDisplayRequestedResolution = nil
-            newState.virtualDisplayRefreshRate = nil
-            newState.virtualDisplayScaleMode = nil
-            newState.builtInBrightnessDimmed = false
-            newState.builtInBrightnessMethod = nil
-            newState.externalDisplayPromoted = false
-            newState.keepAwakeBackend = nil
-            newState.builtInSoftDisconnected = false
-            newState.builtInSoftDisconnectMethod = nil
-            newState.softDisconnectedDisplayID = nil
-            newState.builtInSoftDisconnectLastMessage = nil
-            newState.touchBarHidden = false
-            newState.touchBarHideMethod = nil
-            newState.touchBarLastMessage = nil
-            newState.restoreCooldownUntil = cooldownUntil
+            Self.resetRuntimeState(&newState, lastError: nil, cooldownUntil: cooldownUntil)
         }
         logger.info("Normal Mode restored. Enable cooldown until \(ISO8601DateFormatter().string(from: cooldownUntil)).")
     }
@@ -345,6 +309,72 @@ public final class HeadlessController {
         } else {
             sleepManager.disableKeepAwake()
         }
+    }
+
+    private func createSoftwareVirtualDisplay(resolution: Resolution, config: AppConfig) throws -> UInt32? {
+        try virtualDisplayManager.createVirtualDisplay(
+            resolution: resolution,
+            refreshRate: config.virtualDisplay.refreshRate,
+            scaleMode: config.virtualDisplay.scaleMode
+        )
+    }
+
+    private func promoteSoftwareVirtualDisplay(id: UInt32, resolution: Resolution) -> Bool {
+        do {
+            return try displayManager.setMainDisplay(
+                id: id,
+                reason: "software virtual display",
+                fallbackResolution: resolution
+            )
+        } catch {
+            logger.warn("Software virtual display promotion failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func cleanFailedEnable(message: String) {
+        virtualDisplayManager.destroyVirtualDisplayIfManaged()
+        sleepManager.disableKeepAwake()
+        stateStore.update { cleanState in
+            Self.resetRuntimeState(
+                &cleanState,
+                lastError: message,
+                cooldownUntil: Date().addingTimeInterval(20)
+            )
+        }
+    }
+
+    private static func resetRuntimeState(
+        _ state: inout RuntimeState,
+        lastError: String?,
+        cooldownUntil: Date?
+    ) {
+        state.mode = .normal
+        state.keepAwake = false
+        state.caffeinatePID = nil
+        state.rollbackDeadline = nil
+        state.rollbackConfirmed = true
+        state.lastError = lastError
+        state.originalBrightness = nil
+        state.activeResolutionOverride = nil
+        state.virtualDisplayCreated = false
+        state.virtualDisplayPID = nil
+        state.virtualDisplayID = nil
+        state.virtualDisplayRequestedResolution = nil
+        state.virtualDisplayRefreshRate = nil
+        state.virtualDisplayScaleMode = nil
+        state.builtInBrightnessDimmed = false
+        state.builtInBrightnessMethod = nil
+        state.externalDisplayPromoted = false
+        state.keepAwakeBackend = nil
+        state.builtInSoftDisconnected = false
+        state.builtInSoftDisconnectMethod = nil
+        state.softDisconnectedDisplayID = nil
+        state.builtInSoftDisconnectLastMessage = nil
+        state.touchBarHidden = false
+        state.touchBarHideMethod = nil
+        state.touchBarLastMessage = nil
+        state.restoreCooldownUntil = cooldownUntil
     }
 
     private func isUsableHeadlessState(_ state: RuntimeState) -> Bool {

@@ -75,6 +75,22 @@ public final class DisplayManager {
         )
     }
 
+    private func syntheticManagedVirtualDisplay(id: UInt32, resolution: Resolution) -> DisplayInfo {
+        DisplayInfo(
+            id: id,
+            isMain: id == CGMainDisplayID(),
+            isBuiltIn: false,
+            isActive: true,
+            isOnline: true,
+            width: resolution.width,
+            height: resolution.height,
+            originX: 0,
+            originY: 0,
+            vendorNumber: 0xC0DE,
+            modelNumber: 0x0511
+        )
+    }
+
     public func hasAlternativeDisplay() -> Bool {
         preferredExternalDisplay() != nil
     }
@@ -135,19 +151,10 @@ public final class DisplayManager {
     }
 
     public func setMainDisplayToRestorePriority(managedVirtualDisplayID: UInt32?) throws {
-        let currentDisplays = displays().filter { $0.isActive }
-        guard !currentDisplays.isEmpty else {
+        guard let target = restorePriorityDisplay(managedVirtualDisplayID: managedVirtualDisplayID) else {
             logger.warn("No active displays available while restoring main display priority.")
             return
         }
-
-        let target = currentDisplays.first {
-            !$0.isBuiltIn && $0.id != managedVirtualDisplayID && !$0.isManagedVirtual
-        } ?? currentDisplays.first {
-            $0.isBuiltIn
-        } ?? currentDisplays.first {
-            $0.id != managedVirtualDisplayID
-        } ?? currentDisplays[0]
 
         if target.isMain {
             logger.info("Restore main display priority already satisfied: \(target.id)")
@@ -182,8 +189,12 @@ public final class DisplayManager {
         return restorePriorityDisplay(managedVirtualDisplayID: managedVirtualDisplayID)
     }
 
-    public func setMainDisplay(id targetID: UInt32, reason: String = "requested display") throws -> Bool {
-        guard let target = display(id: targetID),
+    public func setMainDisplay(
+        id targetID: UInt32,
+        reason: String = "requested display",
+        fallbackResolution: Resolution? = nil
+    ) throws -> Bool {
+        guard let target = display(id: targetID) ?? fallbackResolution.map({ syntheticManagedVirtualDisplay(id: targetID, resolution: $0) }),
               target.isActive,
               target.isBuiltIn || target.isOnline || target.isManagedVirtual else {
             logger.warn("Display \(targetID) is not an active external/dummy/virtual display.")

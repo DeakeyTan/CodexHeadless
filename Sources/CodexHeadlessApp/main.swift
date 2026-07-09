@@ -27,6 +27,7 @@ final class StatusBarController: NSObject {
         rebuildMenu()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.controller.rollbackIfNeeded()
+            self?.controller.continuePausedRestoreIfReady()
             self?.controller.syncKeepAwakeWithState()
             self?.controller.syncVirtualDisplayState()
             self?.configureHotkeysIfNeeded()
