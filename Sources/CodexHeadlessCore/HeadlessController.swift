@@ -61,16 +61,24 @@ public final class HeadlessController {
         state.restoreCooldownUntil = nil
         state.activeResolutionOverride = resolutionOverride
         state.originalBrightness = builtInDisplayManager.currentBrightness()
+        state.phase = .startingKeepAwake
+        state.phaseMessage = RuntimePhase.startingKeepAwake.message
+        state.phaseStartedAt = Date()
+        state.phaseDeadlineAt = nil
+        state.lastProgressAt = Date()
         try stateStore.save(state)
 
         let config = configManager.load()
+        let timing = config.effectiveTiming
         let resolution = resolutionOverride ?? config.virtualDisplay.resolution
         let virtualDisplayPolicy = VirtualDisplayPolicy.effectivePolicy(for: config.virtualDisplay)
         try virtualDisplayManager.validateResolution(resolution)
         logger.info("Requested virtual display resolution: \(resolution) @ \(config.virtualDisplay.refreshRate)Hz, policy=\(virtualDisplayPolicy.rawValue).")
 
+        setPhase(.startingKeepAwake)
         try sleepManager.enableKeepAwake()
 
+        setPhase(.checkingDisplays)
         let displays = displayManager.displays()
         logger.info("Displays before headless: \(displays.map { "\($0.id):\($0.typeLabel):\($0.width)x\($0.height):main=\($0.isMain)" }.joined(separator: ", "))")
 
@@ -82,15 +90,22 @@ public final class HeadlessController {
         if virtualDisplayPolicy == .always {
             virtualDisplayID = try createSoftwareVirtualDisplay(resolution: resolution, config: config)
             if let existingExternalDisplayID {
+                setPhase(.usingExternalDisplay)
+                logger.info("External display detected: displayID=\(existingExternalDisplayID)")
                 promotedExternal = try displayManager.setMainDisplay(id: existingExternalDisplayID, reason: "existing external/dummy display")
             } else if let virtualDisplayID {
                 promotedExternal = promoteSoftwareVirtualDisplay(id: virtualDisplayID, resolution: resolution)
             }
             if !promotedExternal && hasExternal {
                 logger.warn("Software virtual display was not promoted; falling back to existing external/dummy display.")
+                setPhase(.promotingExternalDisplay)
                 promotedExternal = try displayManager.setMainDisplayToPreferredExternal()
             }
         } else if hasExternal {
+            setPhase(.usingExternalDisplay)
+            if let existingExternalDisplayID {
+                logger.info("External display detected: displayID=\(existingExternalDisplayID)")
+            }
             promotedExternal = try displayManager.setMainDisplayToPreferredExternal()
         } else if virtualDisplayPolicy == .auto {
             virtualDisplayID = try createSoftwareVirtualDisplay(resolution: resolution, config: config)
@@ -110,6 +125,7 @@ public final class HeadlessController {
             ])
         }
 
+        setPhase(.disconnectingBuiltInDisplay)
         let softDisconnectResult = builtInDisplayManager.attemptSoftDisconnectIfSafe(
             builtInDisplayID: builtInDisplayID,
             hasAlternativeDisplay: hasExternal || promotedExternal,
@@ -118,11 +134,16 @@ public final class HeadlessController {
         let softDisconnected = softDisconnectResult.success
         if softDisconnected {
             logger.info(softDisconnectResult.message)
+            setPhase(.waitingForBuiltInDisplayDisconnect, timeoutSeconds: timing.softDisconnectDisappearWaitSeconds)
             if let builtInDisplayID,
-               displayManager.waitForDisplay(id: builtInDisplayID, present: false) {
+               displayManager.waitForDisplay(
+                   id: builtInDisplayID,
+                   present: false,
+                   timeoutSeconds: TimeInterval(timing.softDisconnectDisappearWaitSeconds)
+               ) {
                 logger.info("Built-in display \(builtInDisplayID) disappeared from display enumeration after soft-disconnect.")
             } else if let builtInDisplayID {
-                logger.warn("Built-in display \(builtInDisplayID) is still visible immediately after soft-disconnect.")
+                logger.warn("Built-in display \(builtInDisplayID) is still visible after \(timing.softDisconnectDisappearWaitSeconds)s soft-disconnect verification wait.")
             }
         } else if config.softDisconnectBuiltInDisplay == true {
             logger.warn(softDisconnectResult.message)
@@ -151,6 +172,7 @@ public final class HeadlessController {
         let headlessReady = promotedExternal && (softDisconnected || brightnessDimmed)
         let touchBarResult: TouchBarChangeResult
         if headlessReady {
+            setPhase(.hidingTouchBar)
             touchBarResult = touchBarManager.hideIfEnabled(config.hideTouchBarInHeadless == true)
             if touchBarResult.success {
                 logger.info(touchBarResult.message)
@@ -188,6 +210,13 @@ public final class HeadlessController {
         } else {
             state.mode = .fallback
         }
+        state.phase = state.mode == .confirmRequired ? .waitingForConfirmation : .idle
+        state.phaseMessage = state.phase?.message
+        state.phaseStartedAt = Date()
+        state.phaseDeadlineAt = rollbackEnabled && config.rollback.enabled
+            ? Date().addingTimeInterval(TimeInterval(config.rollback.timeoutSeconds))
+            : nil
+        state.lastProgressAt = Date()
         state.rollbackConfirmed = !(rollbackEnabled && config.rollback.enabled)
         if rollbackEnabled && config.rollback.enabled {
             state.rollbackDeadline = Date().addingTimeInterval(TimeInterval(config.rollback.timeoutSeconds))
@@ -208,21 +237,105 @@ public final class HeadlessController {
         rollbackGuard.cancel()
 
         let state = stateStore.load()
+        if state.mode == .normal,
+           state.keepAwake == false,
+           state.virtualDisplayCreated == false,
+           state.builtInSoftDisconnected != true,
+           state.builtInBrightnessDimmed != true,
+           state.touchBarHidden != true {
+            stateStore.update { newState in
+                newState.phase = .idle
+                newState.phaseMessage = RuntimePhase.idle.message
+                newState.phaseStartedAt = Date()
+                newState.phaseDeadlineAt = nil
+                newState.lastProgressAt = Date()
+            }
+            logger.info("Normal Mode is already restored.")
+            return
+        }
+
+        let timing = configManager.load().effectiveTiming
+        let restoringAfterPaused = state.phase == .restorePaused || state.mode == .error
+        stateStore.update { newState in
+            newState.mode = .restoring
+        }
+        setPhase(.restoringBuiltInDisplay)
+
         if state.builtInSoftDisconnected == true {
             let restoreDisplayResult = builtInDisplayManager.restoreBuiltInDisplay(displayID: state.softDisconnectedDisplayID)
             if restoreDisplayResult.success {
                 logger.info(restoreDisplayResult.message)
+                setPhase(.waitingForPhysicalDisplay, timeoutSeconds: timing.restoreBuiltInShortWaitSeconds)
                 if let displayID = state.softDisconnectedDisplayID,
-                   displayManager.waitForDisplay(id: displayID, present: true, timeoutSeconds: 10) {
+                   displayManager.waitForDisplay(
+                       id: displayID,
+                       present: true,
+                       timeoutSeconds: TimeInterval(timing.restoreBuiltInShortWaitSeconds)
+                   ) {
                     logger.info("Built-in display \(displayID) reappeared in display enumeration after restore.")
                 } else if let displayID = state.softDisconnectedDisplayID {
-                    logger.warn("Built-in display \(displayID) did not reappear during restore wait.")
+                    logger.warn("Built-in display \(displayID) did not reappear during \(timing.restoreBuiltInShortWaitSeconds)s short restore wait.")
                 }
             } else {
                 logger.warn(restoreDisplayResult.message)
             }
         }
 
+        setPhase(.waitingForPhysicalDisplay, timeoutSeconds: timing.restorePhysicalDisplayWaitSeconds)
+        logger.info("[Phase] waitingForPhysicalDisplay, shortWait=\(timing.restoreBuiltInShortWaitSeconds)s, maxWait=\(timing.restorePhysicalDisplayWaitSeconds)s")
+        let restoreDisplay = displayManager.waitForRestorePriorityDisplay(
+            managedVirtualDisplayID: state.virtualDisplayID,
+            timeoutSeconds: TimeInterval(timing.restorePhysicalDisplayWaitSeconds)
+        )
+        guard restoreDisplay != nil else {
+            logger.warn("Physical display not available after \(timing.restorePhysicalDisplayWaitSeconds)s; keeping managed virtual display alive.")
+            stateStore.update { newState in
+                newState.mode = .restoring
+                newState.phase = .restorePaused
+                newState.phaseMessage = RuntimePhase.restorePaused.message
+                newState.phaseStartedAt = Date()
+                newState.phaseDeadlineAt = nil
+                newState.lastProgressAt = Date()
+                newState.lastError = "Restore paused while waiting for a physical display."
+                newState.rollbackDeadline = nil
+                newState.rollbackConfirmed = true
+            }
+            return
+        }
+
+        if let restoreDisplay {
+            logger.info("Physical display became available: displayID=\(restoreDisplay.id)")
+        }
+        finishRestoreAfterPhysicalDisplayAvailable(state: state, afterPausedRestore: restoringAfterPaused)
+    }
+
+    public func continuePausedRestoreIfReady() {
+        let state = stateStore.load()
+        guard state.mode == .restoring,
+              state.phase == .restorePaused,
+              displayManager.restorePriorityDisplay(managedVirtualDisplayID: state.virtualDisplayID) != nil else {
+            return
+        }
+
+        logger.info("Continuing paused restore after built-in or external display became available.")
+        finishRestoreAfterPhysicalDisplayAvailable(state: state, afterPausedRestore: true)
+    }
+
+    private func finishRestoreAfterPhysicalDisplayAvailable(state: RuntimeState, afterPausedRestore: Bool) {
+        setPhase(.promotingPhysicalDisplay)
+        do {
+            if let restoreDisplay = displayManager.restorePriorityDisplay(managedVirtualDisplayID: state.virtualDisplayID),
+               restoreDisplay.isMain {
+                setPhase(.keepingExternalDisplayAsMain)
+                logger.info("Keeping physical display as main display: \(restoreDisplay.id)")
+            } else {
+                try displayManager.setMainDisplayToRestorePriority(managedVirtualDisplayID: state.virtualDisplayID)
+            }
+        } catch {
+            logger.warn("Failed to restore preferred main display before virtual display cleanup: \(error.localizedDescription)")
+        }
+
+        setPhase(.restoringTouchBar)
         let touchBarResult = touchBarManager.showIfNeeded(state.touchBarHidden)
         if touchBarResult.success {
             logger.info(touchBarResult.message)
@@ -230,6 +343,7 @@ public final class HeadlessController {
             logger.warn(touchBarResult.message)
         }
 
+        setPhase(.restoringBrightness)
         let restoreResult = builtInDisplayManager.restoreBrightness(state.originalBrightness)
         if restoreResult.success {
             logger.info(restoreResult.message)
@@ -237,60 +351,41 @@ public final class HeadlessController {
             logger.warn(restoreResult.message)
         }
 
-        let restoreDisplay = displayManager.waitForRestorePriorityDisplay(
-            managedVirtualDisplayID: state.virtualDisplayID,
-            timeoutSeconds: 12
-        )
-        guard restoreDisplay != nil else {
-            logger.error("Restore paused: no built-in or external display is available; keeping managed virtual display alive.")
-            stateStore.update { newState in
-                newState.mode = .error
-                newState.lastError = "Restore paused because no built-in or external display is available."
-                newState.rollbackDeadline = nil
-                newState.rollbackConfirmed = true
-            }
-            return
-        }
-
-        finishRestoreAfterPhysicalDisplayAvailable(state: state)
-    }
-
-    public func continuePausedRestoreIfReady() {
-        let state = stateStore.load()
-        guard state.mode == .error,
-              state.lastError == "Restore paused because no built-in or external display is available.",
-              displayManager.restorePriorityDisplay(managedVirtualDisplayID: state.virtualDisplayID) != nil else {
-            return
-        }
-
-        logger.info("Continuing paused restore after built-in or external display became available.")
-        finishRestoreAfterPhysicalDisplayAvailable(state: state)
-    }
-
-    private func finishRestoreAfterPhysicalDisplayAvailable(state: RuntimeState) {
-        do {
-            try displayManager.setMainDisplayToRestorePriority(managedVirtualDisplayID: state.virtualDisplayID)
-        } catch {
-            logger.warn("Failed to restore preferred main display before virtual display cleanup: \(error.localizedDescription)")
-        }
-
+        setPhase(.stoppingVirtualDisplay)
         virtualDisplayManager.destroyVirtualDisplayIfManaged()
+        setPhase(.stoppingKeepAwake)
         sleepManager.disableKeepAwake()
-        let cooldownUntil = Date().addingTimeInterval(20)
+        let timing = configManager.load().effectiveTiming
+        let cooldownSeconds = afterPausedRestore ? timing.restoreCooldownAfterPausedSeconds : timing.restoreCooldownSeconds
+        let cooldownUntil = Date().addingTimeInterval(TimeInterval(cooldownSeconds))
 
         stateStore.update { newState in
             Self.resetRuntimeState(&newState, lastError: nil, cooldownUntil: cooldownUntil)
+            newState.phase = .coolingDown
+            newState.phaseMessage = RuntimePhase.coolingDown.message
+            newState.phaseStartedAt = Date()
+            newState.phaseDeadlineAt = cooldownUntil
+            newState.lastProgressAt = Date()
         }
-        logger.info("Normal Mode restored. Enable cooldown until \(ISO8601DateFormatter().string(from: cooldownUntil)).")
+        let suffix = afterPausedRestore ? " after paused restore" : ""
+        logger.info("Normal Mode restored\(suffix). Enable cooldown until \(ISO8601DateFormatter().string(from: cooldownUntil)), duration=\(cooldownSeconds)s.")
     }
 
     public func confirm() {
         rollbackGuard.confirm()
+        stateStore.update { state in
+            state.phase = .idle
+            state.phaseMessage = RuntimePhase.idle.message
+            state.phaseStartedAt = Date()
+            state.phaseDeadlineAt = nil
+            state.lastProgressAt = Date()
+        }
     }
 
     public func rollbackIfNeeded() {
         if rollbackGuard.needsRollback() {
             logger.warn("Rollback deadline expired. Restoring Normal Mode.")
+            setPhase(.rollbackExpired)
             restoreNormal()
         }
     }
@@ -303,6 +398,24 @@ public final class HeadlessController {
         virtualDisplayManager.reconcileManagedVirtualDisplayIfNeeded()
     }
 
+    public func refreshPhaseIfNeeded() {
+        let state = stateStore.load()
+        guard state.mode == .normal,
+              state.phase == .coolingDown,
+              RuntimePhaseFormatter.cooldownRemainingSeconds(state) == 0 else {
+            return
+        }
+
+        stateStore.update { newState in
+            newState.phase = .idle
+            newState.phaseMessage = RuntimePhase.idle.message
+            newState.phaseStartedAt = Date()
+            newState.phaseDeadlineAt = nil
+            newState.lastProgressAt = Date()
+        }
+        logger.info("[Phase] idle")
+    }
+
     public func setKeepAwake(_ enabled: Bool) throws {
         if enabled {
             try sleepManager.enableKeepAwake()
@@ -312,14 +425,20 @@ public final class HeadlessController {
     }
 
     private func createSoftwareVirtualDisplay(resolution: Resolution, config: AppConfig) throws -> UInt32? {
-        try virtualDisplayManager.createVirtualDisplay(
+        let timing = config.effectiveTiming
+        setPhase(.creatingVirtualDisplay)
+        setPhase(.waitingForVirtualDisplayEnumeration, timeoutSeconds: timing.virtualDisplayEnumerationWaitSeconds)
+        return try virtualDisplayManager.createVirtualDisplay(
             resolution: resolution,
             refreshRate: config.virtualDisplay.refreshRate,
-            scaleMode: config.virtualDisplay.scaleMode
+            scaleMode: config.virtualDisplay.scaleMode,
+            waitTimeoutSeconds: TimeInterval(timing.virtualDisplayEnumerationWaitSeconds),
+            reportedIDExtraWaitSeconds: TimeInterval(timing.virtualDisplayReportedIDExtraWaitSeconds)
         )
     }
 
     private func promoteSoftwareVirtualDisplay(id: UInt32, resolution: Resolution) -> Bool {
+        setPhase(.promotingVirtualDisplay)
         do {
             return try displayManager.setMainDisplay(
                 id: id,
@@ -335,12 +454,34 @@ public final class HeadlessController {
     private func cleanFailedEnable(message: String) {
         virtualDisplayManager.destroyVirtualDisplayIfManaged()
         sleepManager.disableKeepAwake()
+        let timing = configManager.load().effectiveTiming
         stateStore.update { cleanState in
             Self.resetRuntimeState(
                 &cleanState,
                 lastError: message,
-                cooldownUntil: Date().addingTimeInterval(20)
+                cooldownUntil: Date().addingTimeInterval(TimeInterval(timing.restoreCooldownAfterPausedSeconds))
             )
+            cleanState.phase = .error
+            cleanState.phaseMessage = RuntimePhase.error.message
+            cleanState.phaseStartedAt = Date()
+            cleanState.phaseDeadlineAt = nil
+            cleanState.lastProgressAt = Date()
+        }
+    }
+
+    private func setPhase(_ phase: RuntimePhase, timeoutSeconds: Int? = nil) {
+        let startedAt = Date()
+        stateStore.update { state in
+            state.phase = phase
+            state.phaseMessage = phase.message
+            state.phaseStartedAt = startedAt
+            state.phaseDeadlineAt = timeoutSeconds.map { startedAt.addingTimeInterval(TimeInterval($0)) }
+            state.lastProgressAt = startedAt
+        }
+        if let timeoutSeconds {
+            logger.info("[Phase] \(phase.rawValue), timeout=\(timeoutSeconds)s")
+        } else {
+            logger.info("[Phase] \(phase.rawValue)")
         }
     }
 
@@ -388,6 +529,7 @@ public final class HeadlessController {
     public func statusText() -> String {
         rollbackIfNeeded()
         syncVirtualDisplayState()
+        refreshPhaseIfNeeded()
 
         let config = configManager.load()
         let state = stateStore.load()
@@ -432,11 +574,19 @@ public final class HeadlessController {
         let softDisconnectText = state.builtInSoftDisconnectLastMessage.map { "\nSoft Disconnect: \($0)" } ?? ""
         let touchBarText = state.touchBarLastMessage.map { "\nTouch Bar: \($0)" } ?? ""
         let lastErrorText = state.lastError.map { "\nLast Error: \($0)" } ?? ""
+        let phaseElapsedText = RuntimePhaseFormatter.elapsedSeconds(state).map { "\($0)s" } ?? "Not Active"
+        let phaseDeadlineText = RuntimePhaseFormatter.deadlineRemainingSeconds(state).map { "\($0)s" } ?? "Not Active"
+        let cooldownRemaining = RuntimePhaseFormatter.cooldownRemainingSeconds(state)
 
         return """
         CodexHeadless Status
         --------------------
         Mode: \(state.mode.rawValue)
+        Phase: \(RuntimePhaseFormatter.phase(state).rawValue)
+        Phase Message: \(RuntimePhaseFormatter.message(state))
+        Phase Elapsed: \(phaseElapsedText)
+        Phase Deadline: \(phaseDeadlineText)
+        Cooldown Remaining: \(cooldownRemaining)s
         Keep Awake: \(state.keepAwake ? "On" : "Off")
         Keep Awake Backend: \(backendText)
         Caffeinate PID: \(pidText)

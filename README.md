@@ -377,6 +377,62 @@ codex-headless touchbar experiment --variant defaults-control-strip-empty --acti
 参考项目 `clemstation/hide-my-bar` 的公开 README 说明 Touch Bar 关闭依赖私有 API，因此这里延续 v0.4 的策略：先 probe，再手动实验，确认可恢复后才接入 `on/off` 主流程。
 目标机上 `dfr-display-brightness-float`、`dfr-display-brightness-int-float`、`dfr-display-brightness-int-double` 已确认会让 helper 以 SIGSEGV 退出；`DFRGetStatus()` 已验证可读出状态，`DFRSetStatus(Int32)` 已验证 API 可调用，但用户确认物理 Touch Bar 没有关闭。`defaults-presentation-function-keys` 会切换到 Function Keys，`defaults-presentation-app-with-control-strip` 会切换到随当前窗口变化的功能区，也不是真正隐藏。`defaults-control-strip-empty` 已验证可以让 Touch Bar 图标全部消失；它不是硬件级断电，但对 OLED 来说黑色区域不发光，满足隐藏 UI / 降低静态显示的目标。开启 `touchbar-hide=on` 后，`codex-headless on` 会使用 `defaults-control-strip-empty` 清空 Touch Bar UI，`codex-headless off` 会从备份恢复 `com.apple.controlstrip`。
 
+## Waiting and Progress Phases
+
+CodexHeadless records a lightweight runtime phase while enabling, confirming, restoring, or cooling down. The menu bar menu and `codex-headless status` show the current step, elapsed time, timeout, and cooldown remaining when applicable.
+
+Common enable phases include:
+
+- `startingKeepAwake`: Starting Keep Awake.
+- `checkingDisplays`: Reading the current display topology.
+- `usingExternalDisplay`: Keeping an external display or HDMI Dummy as the main display.
+- `creatingVirtualDisplay`: Starting the software virtual display host.
+- `waitingForVirtualDisplayEnumeration`: Waiting for macOS to detect the software virtual display.
+- `acceptingReportedVirtualDisplayID`: Continuing with the display ID reported by the host when CoreGraphics enumeration is delayed.
+- `disconnectingBuiltInDisplay`: Soft-disconnecting or dimming the built-in display.
+- `hidingTouchBar`: Hiding Touch Bar UI.
+- `waitingForConfirmation`: Waiting for the rollback confirmation window.
+
+Common restore phases include:
+
+- `restoringBuiltInDisplay`: Requesting the built-in display to return.
+- `waitingForPhysicalDisplay`: Waiting for a built-in, external, or HDMI Dummy display to become available.
+- `promotingPhysicalDisplay`: Setting the physical display as main before stopping the virtual display.
+- `restoringTouchBar`: Restoring Touch Bar UI.
+- `stoppingVirtualDisplay`: Stopping the managed software virtual display.
+- `stoppingKeepAwake`: Stopping Keep Awake.
+- `coolingDown`: Waiting for display state to stabilize before Enable is available again.
+
+When an external display or HDMI Dummy is already available, virtual display creation and virtual display wait phases are skipped unless `virtual-display-policy=always` requires a software virtual display. During restore, the managed virtual display remains alive until a physical display is available. `restorePaused` usually means CodexHeadless is still waiting safely, not that recovery has failed.
+
+## Timing Configuration
+
+Timing values are optional. Existing config files that do not contain `timing` continue to work and use these defaults:
+
+```json
+{
+  "timing": {
+    "virtualDisplayEnumerationWaitSeconds": 5,
+    "virtualDisplayReportedIDExtraWaitSeconds": 2,
+    "softDisconnectDisappearWaitSeconds": 1,
+    "restoreBuiltInShortWaitSeconds": 3,
+    "restorePhysicalDisplayWaitSeconds": 10,
+    "restoreCooldownSeconds": 10,
+    "restoreCooldownAfterPausedSeconds": 20
+  }
+}
+```
+
+CLI helpers:
+
+```bash
+codex-headless config get timing
+codex-headless config set timing.virtualDisplayReportedIDExtraWaitSeconds 2
+codex-headless config set timing.restoreCooldownSeconds 10
+```
+
+Do not set wait durations to `0` unless debugging. If restore becomes unstable, increase `restorePhysicalDisplayWaitSeconds`. If virtual display creation is stable on the target machine, `virtualDisplayReportedIDExtraWaitSeconds` can be reduced carefully. The defaults are optimized for the current target machine and keep the CLI recovery path intact.
+
 ## Install
 
 安装脚本会构建 release 版本，把 CLI 安装到 `/usr/local/bin/codex-headless`，并把状态栏 App 打包安装到 `/Applications/CodexHeadless.app`。

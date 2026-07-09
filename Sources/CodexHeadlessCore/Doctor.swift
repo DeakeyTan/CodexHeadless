@@ -54,6 +54,8 @@ public final class Doctor {
 
         Runtime:
           Mode: \(state.mode.rawValue)
+          Phase: \(RuntimePhaseFormatter.phase(state).rawValue)
+          Current Step: \(RuntimePhaseFormatter.message(state))
           Rollback: \(state.rollbackConfirmed ? "Confirmed" : "Pending")
 
         Files:
@@ -81,6 +83,15 @@ public final class Doctor {
           Backend: \(state.keepAwakeBackend ?? config.keepAwakeBackend?.rawValue ?? KeepAwakeBackend.caffeinate.rawValue)
           Caffeinate: \(caffeinateText)
           pmset: \(pmsetSummary())
+
+        Timing:
+          Virtual display enumeration wait: \(config.effectiveTiming.virtualDisplayEnumerationWaitSeconds)s
+          Reported ID extra wait: \(config.effectiveTiming.virtualDisplayReportedIDExtraWaitSeconds)s
+          Soft-disconnect disappear wait: \(config.effectiveTiming.softDisconnectDisappearWaitSeconds)s
+          Restore built-in short wait: \(config.effectiveTiming.restoreBuiltInShortWaitSeconds)s
+          Restore physical display wait: \(config.effectiveTiming.restorePhysicalDisplayWaitSeconds)s
+          Restore cooldown: \(config.effectiveTiming.restoreCooldownSeconds)s
+          Restore paused cooldown: \(config.effectiveTiming.restoreCooldownAfterPausedSeconds)s
 
         Brightness Fallback:
           IOKit readable: \(builtInDisplayManager.currentBrightness() == nil ? "No" : "Yes")
@@ -201,6 +212,8 @@ public final class Doctor {
             return "Fallback is active. Check `codex-headless status` and logs, then confirm or restore."
         case .preparing:
             return "A transition is in progress. Check `codex-headless status`."
+        case .restoring:
+            return "Restore is in progress. Keep the managed virtual display alive until a physical display is available."
         case .error:
             return "Run `codex-headless off`, then inspect `codex-headless log --tail 100`."
         }

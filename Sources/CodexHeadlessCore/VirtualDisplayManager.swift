@@ -58,7 +58,8 @@ public final class VirtualDisplayManager {
         resolution: Resolution,
         refreshRate: Int = 60,
         scaleMode: String = "standard",
-        waitTimeoutSeconds: TimeInterval = 5
+        waitTimeoutSeconds: TimeInterval = 5,
+        reportedIDExtraWaitSeconds: TimeInterval = 2
     ) throws -> UInt32? {
         try validateResolution(resolution)
         reconcileManagedVirtualDisplayIfNeeded()
@@ -119,6 +120,7 @@ public final class VirtualDisplayManager {
         let displayID = waitForNewDisplayID(
             beforeIDs: beforeIDs,
             timeoutSeconds: waitTimeoutSeconds,
+            reportedIDExtraWaitSeconds: reportedIDExtraWaitSeconds,
             outputCollector: outputCollector
         )
         outputPipe.fileHandleForReading.readabilityHandler = nil
@@ -223,6 +225,7 @@ public final class VirtualDisplayManager {
     private func waitForNewDisplayID(
         beforeIDs: Set<UInt32>,
         timeoutSeconds: TimeInterval,
+        reportedIDExtraWaitSeconds: TimeInterval,
         outputCollector: PipeTextCollector
     ) -> UInt32? {
         let displayManager = DisplayManager()
@@ -248,17 +251,22 @@ public final class VirtualDisplayManager {
 
                 if reportedDisplayID != stdoutDisplayID {
                     reportedDisplayID = stdoutDisplayID
-                    let extendedDeadline = Date().addingTimeInterval(20)
-                    if deadline < extendedDeadline {
-                        deadline = extendedDeadline
+                    stateStore.update { state in
+                        state.phase = .acceptingReportedVirtualDisplayID
+                        state.phaseMessage = RuntimePhase.acceptingReportedVirtualDisplayID.message
+                        state.phaseStartedAt = Date()
+                        state.phaseDeadlineAt = Date().addingTimeInterval(reportedIDExtraWaitSeconds)
+                        state.lastProgressAt = Date()
                     }
-                    logger.info("Virtual display host reported displayID=\(stdoutDisplayID); waiting for CoreGraphics display enumeration.")
+                    deadline = Date().addingTimeInterval(reportedIDExtraWaitSeconds)
+                    logger.info("[Phase] acceptingReportedVirtualDisplayID, displayID=\(stdoutDisplayID), extraWait=\(Int(reportedIDExtraWaitSeconds))s")
+                    logger.info("Virtual display host reported displayID=\(stdoutDisplayID); extra wait \(Int(reportedIDExtraWaitSeconds))s for CoreGraphics enumeration.")
                 }
             }
             Thread.sleep(forTimeInterval: 0.15)
         }
         if let reportedDisplayID {
-            logger.info("Virtual display host reported displayID=\(reportedDisplayID); accepting reported ID for promotion attempt.")
+            logger.info("CoreGraphics did not enumerate displayID=\(reportedDisplayID) after \(Int(reportedIDExtraWaitSeconds))s; accepting reported ID.")
             return reportedDisplayID
         }
         return nil

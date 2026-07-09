@@ -113,4 +113,39 @@ public final class ConfigManager {
         try save(config)
         logger.info("Configured Confirm/Rollback dialog: \(enabled ? "enabled" : "disabled")")
     }
+
+    public func setTimingValue(key: String, seconds: Int) throws {
+        guard seconds >= 0, seconds <= 120 else {
+            throw NSError(domain: "CodexHeadless.Timing", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid timing value: use a value from 0 to 120 seconds."
+            ])
+        }
+
+        var config = load()
+        var timing = config.effectiveTiming
+        switch key {
+        case "virtualDisplayEnumerationWaitSeconds":
+            timing.virtualDisplayEnumerationWaitSeconds = seconds
+        case "virtualDisplayReportedIDExtraWaitSeconds":
+            timing.virtualDisplayReportedIDExtraWaitSeconds = seconds
+        case "softDisconnectDisappearWaitSeconds":
+            timing.softDisconnectDisappearWaitSeconds = seconds
+        case "restoreBuiltInShortWaitSeconds":
+            timing.restoreBuiltInShortWaitSeconds = seconds
+        case "restorePhysicalDisplayWaitSeconds":
+            timing.restorePhysicalDisplayWaitSeconds = seconds
+        case "restoreCooldownSeconds":
+            timing.restoreCooldownSeconds = seconds
+        case "restoreCooldownAfterPausedSeconds":
+            timing.restoreCooldownAfterPausedSeconds = seconds
+        default:
+            throw NSError(domain: "CodexHeadless.Timing", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Unsupported timing key: \(key)"
+            ])
+        }
+
+        config.timing = timing
+        try save(config)
+        logger.info("Configured timing.\(key): \(seconds)s")
+    }
 }

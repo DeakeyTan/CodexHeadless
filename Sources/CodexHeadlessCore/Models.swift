@@ -6,7 +6,66 @@ public enum HeadlessMode: String, Codable {
     case confirmRequired = "Confirm Required"
     case headless = "Headless"
     case fallback = "Fallback"
+    case restoring = "Restoring"
     case error = "Error"
+}
+
+public enum RuntimePhase: String, Codable {
+    case idle
+    case startingKeepAwake
+    case checkingDisplays
+    case usingExternalDisplay
+    case creatingVirtualDisplay
+    case waitingForVirtualDisplayEnumeration
+    case acceptingReportedVirtualDisplayID
+    case promotingVirtualDisplay
+    case promotingExternalDisplay
+    case disconnectingBuiltInDisplay
+    case waitingForBuiltInDisplayDisconnect
+    case hidingTouchBar
+    case waitingForConfirmation
+    case rollbackExpired
+    case restoringBuiltInDisplay
+    case waitingForPhysicalDisplay
+    case promotingPhysicalDisplay
+    case keepingExternalDisplayAsMain
+    case restoringTouchBar
+    case restoringBrightness
+    case stoppingVirtualDisplay
+    case stoppingKeepAwake
+    case coolingDown
+    case restorePaused
+    case error
+
+    public var message: String {
+        switch self {
+        case .idle: "Ready."
+        case .startingKeepAwake: "Starting Keep Awake..."
+        case .checkingDisplays: "Checking displays..."
+        case .usingExternalDisplay: "Using external display as main display..."
+        case .creatingVirtualDisplay: "Creating virtual display..."
+        case .waitingForVirtualDisplayEnumeration: "Waiting for macOS to detect the virtual display..."
+        case .acceptingReportedVirtualDisplayID: "Using the reported virtual display ID..."
+        case .promotingVirtualDisplay: "Setting virtual display as main display..."
+        case .promotingExternalDisplay: "Setting external display as main display..."
+        case .disconnectingBuiltInDisplay: "Disconnecting built-in display..."
+        case .waitingForBuiltInDisplayDisconnect: "Checking built-in display state..."
+        case .hidingTouchBar: "Hiding Touch Bar UI..."
+        case .waitingForConfirmation: "Waiting for confirmation..."
+        case .rollbackExpired: "Rollback deadline expired. Restoring Normal Mode..."
+        case .restoringBuiltInDisplay: "Restoring built-in display..."
+        case .waitingForPhysicalDisplay: "Waiting for a physical display to become available..."
+        case .promotingPhysicalDisplay: "Setting physical display as main display..."
+        case .keepingExternalDisplayAsMain: "Keeping external display as main display..."
+        case .restoringTouchBar: "Restoring Touch Bar UI..."
+        case .restoringBrightness: "Restoring display brightness..."
+        case .stoppingVirtualDisplay: "Stopping virtual display..."
+        case .stoppingKeepAwake: "Stopping Keep Awake..."
+        case .coolingDown: "Waiting for display state to stabilize..."
+        case .restorePaused: "Restore paused. Waiting for a physical display..."
+        case .error: "An error occurred. Check the log or run restore."
+        }
+    }
 }
 
 public struct Resolution: Codable, Equatable, CustomStringConvertible {
@@ -198,6 +257,26 @@ public struct ConfirmDialogConfig: Codable {
     )
 }
 
+public struct TimingConfig: Codable {
+    public var virtualDisplayEnumerationWaitSeconds: Int
+    public var virtualDisplayReportedIDExtraWaitSeconds: Int
+    public var softDisconnectDisappearWaitSeconds: Int
+    public var restoreBuiltInShortWaitSeconds: Int
+    public var restorePhysicalDisplayWaitSeconds: Int
+    public var restoreCooldownSeconds: Int
+    public var restoreCooldownAfterPausedSeconds: Int
+
+    public static let `default` = TimingConfig(
+        virtualDisplayEnumerationWaitSeconds: 5,
+        virtualDisplayReportedIDExtraWaitSeconds: 2,
+        softDisconnectDisappearWaitSeconds: 1,
+        restoreBuiltInShortWaitSeconds: 3,
+        restorePhysicalDisplayWaitSeconds: 10,
+        restoreCooldownSeconds: 10,
+        restoreCooldownAfterPausedSeconds: 20
+    )
+}
+
 public struct AppConfig: Codable {
     public var keepAwakeOnLaunch: Bool
     public var startAtLogin: Bool
@@ -209,6 +288,7 @@ public struct AppConfig: Codable {
     public var hideTouchBarInHeadless: Bool?
     public var hotkeys: HotkeysConfig?
     public var confirmDialog: ConfirmDialogConfig?
+    public var timing: TimingConfig?
 
     public var effectiveHotkeys: HotkeysConfig {
         hotkeys ?? .default
@@ -216,6 +296,10 @@ public struct AppConfig: Codable {
 
     public var effectiveConfirmDialog: ConfirmDialogConfig {
         confirmDialog ?? .default
+    }
+
+    public var effectiveTiming: TimingConfig {
+        timing ?? .default
     }
 
     public static let `default` = AppConfig(
@@ -228,7 +312,8 @@ public struct AppConfig: Codable {
         keepAwakeBackend: .caffeinate,
         hideTouchBarInHeadless: false,
         hotkeys: .default,
-        confirmDialog: .default
+        confirmDialog: .default,
+        timing: .default
     )
 }
 
@@ -259,6 +344,11 @@ public struct RuntimeState: Codable {
     public var touchBarHideMethod: String?
     public var touchBarLastMessage: String?
     public var restoreCooldownUntil: Date?
+    public var phase: RuntimePhase?
+    public var phaseMessage: String?
+    public var phaseStartedAt: Date?
+    public var phaseDeadlineAt: Date?
+    public var lastProgressAt: Date?
 
     public static let `default` = RuntimeState(
         mode: .normal,
@@ -286,6 +376,43 @@ public struct RuntimeState: Codable {
         touchBarHidden: false,
         touchBarHideMethod: nil,
         touchBarLastMessage: nil,
-        restoreCooldownUntil: nil
+        restoreCooldownUntil: nil,
+        phase: .idle,
+        phaseMessage: RuntimePhase.idle.message,
+        phaseStartedAt: nil,
+        phaseDeadlineAt: nil,
+        lastProgressAt: nil
     )
+}
+
+public enum RuntimePhaseFormatter {
+    public static func phase(_ state: RuntimeState) -> RuntimePhase {
+        state.phase ?? .idle
+    }
+
+    public static func message(_ state: RuntimeState) -> String {
+        state.phaseMessage ?? phase(state).message
+    }
+
+    public static func elapsedSeconds(_ state: RuntimeState, now: Date = Date()) -> Int? {
+        guard let startedAt = state.phaseStartedAt else {
+            return nil
+        }
+        return max(0, Int(now.timeIntervalSince(startedAt).rounded(.down)))
+    }
+
+    public static func deadlineRemainingSeconds(_ state: RuntimeState, now: Date = Date()) -> Int? {
+        guard let deadline = state.phaseDeadlineAt else {
+            return nil
+        }
+        return max(0, Int(ceil(deadline.timeIntervalSince(now))))
+    }
+
+    public static func cooldownRemainingSeconds(_ state: RuntimeState, now: Date = Date()) -> Int {
+        guard let cooldownUntil = state.restoreCooldownUntil,
+              cooldownUntil > now else {
+            return 0
+        }
+        return max(0, Int(ceil(cooldownUntil.timeIntervalSince(now))))
+    }
 }

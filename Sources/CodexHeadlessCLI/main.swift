@@ -33,6 +33,8 @@ func printUsage() {
       codex-headless config set hotkeys.enabled true|false
       codex-headless config get confirm-dialog
       codex-headless config set confirm-dialog.enabled true|false
+      codex-headless config get timing
+      codex-headless config set timing.KEY SECONDS
       codex-headless config get keep-awake-backend
       codex-headless config set keep-awake-backend caffeinate|native
       codex-headless doctor
@@ -590,10 +592,19 @@ do {
 
     case "config":
         guard args.count >= 3 else {
-            fail("Usage: codex-headless config get resolution|scale-mode|virtual-display-policy|soft-disconnect|keep-awake-backend|touchbar-hide|hotkeys|confirm-dialog | config set resolution WIDTHxHEIGHT | config set scale-mode standard|hidpi | config set virtual-display-policy auto|always|off | config set soft-disconnect on|off | config set keep-awake-backend caffeinate|native | config set touchbar-hide on|off | config set hotkeys.enabled true|false | config set confirm-dialog.enabled true|false | config reset soft-disconnect-block")
+            fail("Usage: codex-headless config get resolution|scale-mode|virtual-display-policy|soft-disconnect|keep-awake-backend|touchbar-hide|hotkeys|confirm-dialog|timing | config set resolution WIDTHxHEIGHT | config set scale-mode standard|hidpi | config set virtual-display-policy auto|always|off | config set soft-disconnect on|off | config set keep-awake-backend caffeinate|native | config set touchbar-hide on|off | config set hotkeys.enabled true|false | config set confirm-dialog.enabled true|false | config set timing.KEY SECONDS | config reset soft-disconnect-block")
         }
         let action = args[1]
         let key = args[2]
+        let timingKeys: Set<String> = [
+            "timing.virtualDisplayEnumerationWaitSeconds",
+            "timing.virtualDisplayReportedIDExtraWaitSeconds",
+            "timing.softDisconnectDisappearWaitSeconds",
+            "timing.restoreBuiltInShortWaitSeconds",
+            "timing.restorePhysicalDisplayWaitSeconds",
+            "timing.restoreCooldownSeconds",
+            "timing.restoreCooldownAfterPausedSeconds"
+        ]
         guard key == "resolution"
             || key == "scale-mode"
             || key == "virtual-display-policy"
@@ -604,7 +615,9 @@ do {
             || key == "hotkeys"
             || key == "hotkeys.enabled"
             || key == "confirm-dialog"
-            || key == "confirm-dialog.enabled" else {
+            || key == "confirm-dialog.enabled"
+            || key == "timing"
+            || timingKeys.contains(key) else {
             fail("Unsupported config key: \(key)")
         }
 
@@ -639,14 +652,30 @@ do {
                 print("confirm-dialog.show-countdown=\(confirmDialog.showCountdown)")
             } else if key == "confirm-dialog.enabled" {
                 print("confirm-dialog.enabled=\(config.effectiveConfirmDialog.enabled)")
+            } else if key == "timing" {
+                let timing = config.effectiveTiming
+                print("virtualDisplayEnumerationWaitSeconds=\(timing.virtualDisplayEnumerationWaitSeconds)")
+                print("virtualDisplayReportedIDExtraWaitSeconds=\(timing.virtualDisplayReportedIDExtraWaitSeconds)")
+                print("softDisconnectDisappearWaitSeconds=\(timing.softDisconnectDisappearWaitSeconds)")
+                print("restoreBuiltInShortWaitSeconds=\(timing.restoreBuiltInShortWaitSeconds)")
+                print("restorePhysicalDisplayWaitSeconds=\(timing.restorePhysicalDisplayWaitSeconds)")
+                print("restoreCooldownSeconds=\(timing.restoreCooldownSeconds)")
+                print("restoreCooldownAfterPausedSeconds=\(timing.restoreCooldownAfterPausedSeconds)")
             } else {
                 print("soft-disconnect-block=\(config.softDisconnectBlockedReason ?? "none")")
             }
         case "set":
             guard args.count == 4 else {
-                fail("Usage: codex-headless config set resolution WIDTHxHEIGHT | config set scale-mode standard|hidpi | config set virtual-display-policy auto|always|off | config set soft-disconnect on|off | config set keep-awake-backend caffeinate|native | config set touchbar-hide on|off | config set hotkeys.enabled true|false | config set confirm-dialog.enabled true|false")
+                fail("Usage: codex-headless config set resolution WIDTHxHEIGHT | config set scale-mode standard|hidpi | config set virtual-display-policy auto|always|off | config set soft-disconnect on|off | config set keep-awake-backend caffeinate|native | config set touchbar-hide on|off | config set hotkeys.enabled true|false | config set confirm-dialog.enabled true|false | config set timing.KEY SECONDS")
             }
-            if key == "resolution" {
+            if timingKeys.contains(key) {
+                guard let seconds = Int(args[3]) else {
+                    fail("Usage: codex-headless config set \(key) SECONDS")
+                }
+                let timingKey = String(key.dropFirst("timing.".count))
+                try configManager.setTimingValue(key: timingKey, seconds: seconds)
+                print("\(timingKey)=\(seconds)")
+            } else if key == "resolution" {
                 let resolution = try ResolutionManager.parse(args[3])
                 try configManager.setResolution(resolution)
                 print("resolution=\(resolution)")

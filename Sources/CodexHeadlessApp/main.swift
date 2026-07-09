@@ -30,6 +30,7 @@ final class StatusBarController: NSObject {
             self?.controller.continuePausedRestoreIfReady()
             self?.controller.syncKeepAwakeWithState()
             self?.controller.syncVirtualDisplayState()
+            self?.controller.refreshPhaseIfNeeded()
             self?.configureHotkeysIfNeeded()
             self?.syncConfirmDialogWithState()
             self?.rebuildMenu()
@@ -52,13 +53,19 @@ final class StatusBarController: NSObject {
     }
 
     private func updateTitle() {
-        let mode = stateStore.load().mode
+        let state = stateStore.load()
+        if RuntimePhaseFormatter.cooldownRemainingSeconds(state) > 0 {
+            statusItem.button?.title = "CH: Cooldown"
+            return
+        }
+        let mode = state.mode
         statusItem.button?.title = switch mode {
         case .normal: "CH"
         case .preparing: "CH: Prep"
         case .confirmRequired: "CH: Wait"
         case .headless: "CH: On"
         case .fallback: "CH: Fall"
+        case .restoring: "CH: Restoring"
         case .error: "CH: Err"
         }
     }
@@ -80,6 +87,7 @@ final class StatusBarController: NSObject {
         menu.addItem(disabledItem("Virtual Display: \(state.virtualDisplayCreated ? "Active" : "Inactive")"))
         menu.addItem(disabledItem("Built-in: \(builtInHandlingSummary(state: state))"))
         menu.addItem(disabledItem("Touch Bar: \(state.touchBarHidden == true ? "Hidden" : "Active")"))
+        addPhaseItems(to: menu, state: state)
         menu.addItem(.separator())
 
         if state.mode == .confirmRequired {
@@ -288,6 +296,28 @@ final class StatusBarController: NSObject {
         return "Active"
     }
 
+    private func addPhaseItems(to menu: NSMenu, state: RuntimeState) {
+        let phase = RuntimePhaseFormatter.phase(state)
+        let cooldownRemaining = RuntimePhaseFormatter.cooldownRemainingSeconds(state)
+        guard phase != .idle || cooldownRemaining > 0 else {
+            return
+        }
+
+        menu.addItem(disabledItem("Current Step: \(RuntimePhaseFormatter.message(state))"))
+        if let elapsed = RuntimePhaseFormatter.elapsedSeconds(state) {
+            menu.addItem(disabledItem("Elapsed: \(elapsed)s"))
+        }
+        if let remaining = RuntimePhaseFormatter.deadlineRemainingSeconds(state) {
+            menu.addItem(disabledItem("Timeout: \(remaining)s"))
+        }
+        if cooldownRemaining > 0 {
+            menu.addItem(disabledItem("Enable available in: \(cooldownRemaining)s"))
+        }
+        if phase == .restorePaused {
+            menu.addItem(disabledItem("The virtual display will stay active until a physical display is available."))
+        }
+    }
+
     private func autoRollbackText(state: RuntimeState) -> String {
         guard let deadline = state.rollbackDeadline else {
             return "Auto rollback: Pending"
@@ -386,7 +416,7 @@ final class StatusBarController: NSObject {
         let state = stateStore.load()
         logger.info("[State] restore requested, source=\(source), current=\(state.mode.rawValue)")
         switch state.mode {
-        case .preparing, .confirmRequired, .headless, .fallback, .error:
+        case .preparing, .confirmRequired, .headless, .fallback, .restoring, .error:
             controller.restoreNormal()
             confirmDialogController.dismiss(reason: "restored by \(source)")
             rebuildMenu()
