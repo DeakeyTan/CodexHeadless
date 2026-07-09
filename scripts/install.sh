@@ -4,6 +4,19 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+export MACOSX_DEPLOYMENT_TARGET="${CODEX_HEADLESS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-13.0}}"
+if [[ -n "${CODEX_HEADLESS_SDKROOT:-}" ]]; then
+  export SDKROOT="$CODEX_HEADLESS_SDKROOT"
+fi
+
+echo "Building CodexHeadless..."
+echo "Deployment target: $MACOSX_DEPLOYMENT_TARGET"
+if [[ -n "${SDKROOT:-}" ]]; then
+  echo "SDKROOT: $SDKROOT"
+else
+  echo "SDKROOT: system default"
+fi
+
 swift build --build-system native -c release
 
 mkdir -p "$HOME/Library/Application Support/CodexHeadless"

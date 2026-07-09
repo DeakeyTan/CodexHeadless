@@ -6,6 +6,7 @@ APP_EXECUTABLE_SOURCE="$ROOT_DIR/.build/release/CodexHeadless"
 CLI_EXECUTABLE_SOURCE="$ROOT_DIR/.build/release/codex-headless"
 APP_BUNDLE_SOURCE="$ROOT_DIR/.build/release/CodexHeadless.app"
 ICON_SOURCE="$ROOT_DIR/icon.png"
+MIN_MACOS_VERSION="${CODEX_HEADLESS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-13.0}}"
 
 if [[ ! -x "$APP_EXECUTABLE_SOURCE" ]]; then
   echo "Missing release executable: $APP_EXECUTABLE_SOURCE" >&2
@@ -32,7 +33,7 @@ else
   echo "Warning: icon.png not found; app bundle will not include a custom icon." >&2
 fi
 
-cat > "$APP_BUNDLE_SOURCE/Contents/Info.plist" <<'PLIST'
+cat > "$APP_BUNDLE_SOURCE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -56,7 +57,7 @@ cat > "$APP_BUNDLE_SOURCE/Contents/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key>
     <string>0.5</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>$MIN_MACOS_VERSION</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

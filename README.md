@@ -16,6 +16,7 @@ CodexHeadless is a macOS menu bar utility and CLI for using a MacBook as a remot
 - [文件位置 / File Locations](#文件位置--file-locations)
 - [安全与限制 / Safety and Limitations](#安全与限制--safety-and-limitations)
 - [诊断与恢复 / Diagnostics and Recovery](#诊断与恢复--diagnostics-and-recovery)
+- [兼容性 / Compatibility](#兼容性--compatibility)
 - [构建 / Build](#构建--build)
 
 ## 核心功能 / Features
@@ -404,6 +405,68 @@ Recommended recovery order:
    ```bash
    codex-headless doctor
    ```
+
+## 兼容性 / Compatibility
+
+中文：
+
+- 当前默认运行目标是 macOS 13.0，App bundle 也会写入 `LSMinimumSystemVersion=13.0`。
+- SwiftPM manifest 使用 Swift tools 5.7，以兼容更多 Xcode / Command Line Tools 版本。
+- 软件虚拟显示器会在运行时探测 `CGVirtualDisplay`，如果当前 macOS 不支持，对应功能会失败并写入诊断日志。
+- 如果构建机安装了多个 SDK，或者默认选到了不兼容的 SDK，可以显式指定 SDK 和部署目标：
+
+```bash
+CODEX_HEADLESS_DEPLOYMENT_TARGET=13.0 \
+CODEX_HEADLESS_SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+./scripts/install.sh
+```
+
+如果需要固定到某个 SDK，例如 `MacOSX15.4.sdk`：
+
+```bash
+CODEX_HEADLESS_DEPLOYMENT_TARGET=13.0 \
+CODEX_HEADLESS_SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
+./scripts/install.sh
+```
+
+朋友机器构建失败时，先收集这些信息：
+
+```bash
+sw_vers
+xcodebuild -version
+swift --version
+xcrun --sdk macosx --show-sdk-path
+```
+
+English:
+
+- The default runtime deployment target is macOS 13.0, and the app bundle writes `LSMinimumSystemVersion=13.0`.
+- The SwiftPM manifest uses Swift tools 5.7 for broader Xcode / Command Line Tools compatibility.
+- Software virtual display support probes `CGVirtualDisplay` at runtime. If the current macOS does not support it, the feature fails gracefully and records diagnostics.
+- If the build machine has multiple SDKs, or the default SDK is incompatible, specify the SDK and deployment target explicitly:
+
+```bash
+CODEX_HEADLESS_DEPLOYMENT_TARGET=13.0 \
+CODEX_HEADLESS_SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+./scripts/install.sh
+```
+
+To pin a specific SDK, such as `MacOSX15.4.sdk`:
+
+```bash
+CODEX_HEADLESS_DEPLOYMENT_TARGET=13.0 \
+CODEX_HEADLESS_SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk \
+./scripts/install.sh
+```
+
+When a friend's machine fails to build, collect:
+
+```bash
+sw_vers
+xcodebuild -version
+swift --version
+xcrun --sdk macosx --show-sdk-path
+```
 
 ## 构建 / Build
 
