@@ -103,7 +103,7 @@ public enum ResolutionError: LocalizedError {
 }
 
 public enum ResolutionManager {
-    public static let defaultResolution = Resolution(width: 1920, height: 1080)
+    public static let defaultResolution = Resolution(width: 2560, height: 1440)
 
     public static let presets: [Resolution] = [
         Resolution(width: 1280, height: 720),
@@ -196,7 +196,7 @@ public struct VirtualDisplayConfig: Codable {
         policy: VirtualDisplayPolicy.auto.rawValue,
         resolution: ResolutionManager.defaultResolution,
         refreshRate: 60,
-        scaleMode: "standard"
+        scaleMode: "hidpi"
     )
 }
 
@@ -263,18 +263,36 @@ public struct TimingConfig: Codable {
     public var softDisconnectDisappearWaitSeconds: Int
     public var restoreBuiltInShortWaitSeconds: Int
     public var restorePhysicalDisplayWaitSeconds: Int
+    public var restorePhysicalDisplayGraceSeconds: Int?
+    public var restorePhysicalDisplayGracePollIntervalMilliseconds: Int?
     public var restoreCooldownSeconds: Int
     public var restoreCooldownAfterPausedSeconds: Int
+    public var restorePostPromoteStabilizationMilliseconds: Int?
 
     public static let `default` = TimingConfig(
         virtualDisplayEnumerationWaitSeconds: 5,
         virtualDisplayReportedIDExtraWaitSeconds: 2,
         softDisconnectDisappearWaitSeconds: 1,
         restoreBuiltInShortWaitSeconds: 3,
-        restorePhysicalDisplayWaitSeconds: 10,
-        restoreCooldownSeconds: 10,
-        restoreCooldownAfterPausedSeconds: 20
+        restorePhysicalDisplayWaitSeconds: 5,
+        restorePhysicalDisplayGraceSeconds: 5,
+        restorePhysicalDisplayGracePollIntervalMilliseconds: 250,
+        restoreCooldownSeconds: 5,
+        restoreCooldownAfterPausedSeconds: 5,
+        restorePostPromoteStabilizationMilliseconds: 500
     )
+
+    public var effectiveRestorePhysicalDisplayGraceSeconds: Int {
+        restorePhysicalDisplayGraceSeconds ?? Self.default.restorePhysicalDisplayGraceSeconds ?? 3
+    }
+
+    public var effectiveRestorePhysicalDisplayGracePollIntervalMilliseconds: Int {
+        restorePhysicalDisplayGracePollIntervalMilliseconds ?? Self.default.restorePhysicalDisplayGracePollIntervalMilliseconds ?? 250
+    }
+
+    public var effectiveRestorePostPromoteStabilizationMilliseconds: Int {
+        restorePostPromoteStabilizationMilliseconds ?? Self.default.restorePostPromoteStabilizationMilliseconds ?? 750
+    }
 }
 
 public struct AppConfig: Codable {
@@ -307,10 +325,10 @@ public struct AppConfig: Codable {
         startAtLogin: false,
         virtualDisplay: .default,
         rollback: .default,
-        softDisconnectBuiltInDisplay: false,
+        softDisconnectBuiltInDisplay: true,
         softDisconnectBlockedReason: nil,
         keepAwakeBackend: .caffeinate,
-        hideTouchBarInHeadless: false,
+        hideTouchBarInHeadless: true,
         hotkeys: .default,
         confirmDialog: .default,
         timing: .default

@@ -115,9 +115,11 @@ public final class ConfigManager {
     }
 
     public func setTimingValue(key: String, seconds: Int) throws {
-        guard seconds >= 0, seconds <= 120 else {
+        let isMilliseconds = key.hasSuffix("Milliseconds")
+        let maxValue = isMilliseconds ? 10_000 : 120
+        guard seconds >= 0, seconds <= maxValue else {
             throw NSError(domain: "CodexHeadless.Timing", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "Invalid timing value: use a value from 0 to 120 seconds."
+                NSLocalizedDescriptionKey: "Invalid timing value: use a value from 0 to \(maxValue)\(isMilliseconds ? " milliseconds" : " seconds")."
             ])
         }
 
@@ -134,10 +136,16 @@ public final class ConfigManager {
             timing.restoreBuiltInShortWaitSeconds = seconds
         case "restorePhysicalDisplayWaitSeconds":
             timing.restorePhysicalDisplayWaitSeconds = seconds
+        case "restorePhysicalDisplayGraceSeconds":
+            timing.restorePhysicalDisplayGraceSeconds = seconds
+        case "restorePhysicalDisplayGracePollIntervalMilliseconds":
+            timing.restorePhysicalDisplayGracePollIntervalMilliseconds = seconds
         case "restoreCooldownSeconds":
             timing.restoreCooldownSeconds = seconds
         case "restoreCooldownAfterPausedSeconds":
             timing.restoreCooldownAfterPausedSeconds = seconds
+        case "restorePostPromoteStabilizationMilliseconds":
+            timing.restorePostPromoteStabilizationMilliseconds = seconds
         default:
             throw NSError(domain: "CodexHeadless.Timing", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Unsupported timing key: \(key)"
@@ -147,5 +155,17 @@ public final class ConfigManager {
         config.timing = timing
         try save(config)
         logger.info("Configured timing.\(key): \(seconds)s")
+    }
+
+    public func resetTimingToDefault() throws {
+        var config = load()
+        config.timing = .default
+        try save(config)
+        logger.info("Reset timing configuration to defaults.")
+    }
+
+    public func resetConfigToDefault() throws {
+        try save(.default)
+        logger.info("Reset configuration to defaults.")
     }
 }

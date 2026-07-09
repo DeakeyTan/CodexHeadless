@@ -86,14 +86,14 @@ public enum SelfTest {
     }
 
     private static func testRecommendedPresets() -> SelfTestResult {
-        let hasDefault = ResolutionManager.presets.contains(Resolution(width: 1920, height: 1080))
-        let hasMain = ResolutionManager.presets.contains(Resolution(width: 2560, height: 1440))
-        let defaultMatches = ResolutionManager.defaultResolution == Resolution(width: 1920, height: 1080)
-        let passed = hasDefault && hasMain && defaultMatches
+        let hasLegacyPreset = ResolutionManager.presets.contains(Resolution(width: 1920, height: 1080))
+        let hasDefaultPreset = ResolutionManager.presets.contains(Resolution(width: 2560, height: 1440))
+        let defaultMatches = ResolutionManager.defaultResolution == Resolution(width: 2560, height: 1440)
+        let passed = hasLegacyPreset && hasDefaultPreset && defaultMatches
         return SelfTestResult(
             name: "recommended presets",
             passed: passed,
-            detail: "default=\(ResolutionManager.defaultResolution), 1920x1080=\(hasDefault), 2560x1440=\(hasMain)"
+            detail: "default=\(ResolutionManager.defaultResolution), 1920x1080=\(hasLegacyPreset), 2560x1440=\(hasDefaultPreset)"
         )
     }
 

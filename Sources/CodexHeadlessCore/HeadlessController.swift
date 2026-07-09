@@ -283,12 +283,20 @@ public final class HeadlessController {
 
         setPhase(.waitingForPhysicalDisplay, timeoutSeconds: timing.restorePhysicalDisplayWaitSeconds)
         logger.info("[Phase] waitingForPhysicalDisplay, shortWait=\(timing.restoreBuiltInShortWaitSeconds)s, maxWait=\(timing.restorePhysicalDisplayWaitSeconds)s")
-        let restoreDisplay = displayManager.waitForRestorePriorityDisplay(
+        var restoreDisplay = displayManager.waitForRestorePriorityDisplay(
             managedVirtualDisplayID: state.virtualDisplayID,
             timeoutSeconds: TimeInterval(timing.restorePhysicalDisplayWaitSeconds)
         )
+        if restoreDisplay == nil {
+            logger.warn("Physical display was not enumerated before primary timeout; entering final grace polling.")
+            restoreDisplay = waitForRestorePriorityDisplayDuringGrace(
+                managedVirtualDisplayID: state.virtualDisplayID,
+                timing: timing
+            )
+        }
+
         guard restoreDisplay != nil else {
-            logger.warn("Physical display not available after \(timing.restorePhysicalDisplayWaitSeconds)s; keeping managed virtual display alive.")
+            logger.warn("Physical display still unavailable after grace polling; entering paused restore and keeping managed virtual display alive for safety.")
             stateStore.update { newState in
                 newState.mode = .restoring
                 newState.phase = .restorePaused
@@ -317,11 +325,12 @@ public final class HeadlessController {
             return
         }
 
-        logger.info("Continuing paused restore after built-in or external display became available.")
+        logger.info("Paused restore resumed after a physical display became available.")
         finishRestoreAfterPhysicalDisplayAvailable(state: state, afterPausedRestore: true)
     }
 
     private func finishRestoreAfterPhysicalDisplayAvailable(state: RuntimeState, afterPausedRestore: Bool) {
+        let timing = configManager.load().effectiveTiming
         setPhase(.promotingPhysicalDisplay)
         do {
             if let restoreDisplay = displayManager.restorePriorityDisplay(managedVirtualDisplayID: state.virtualDisplayID),
@@ -334,6 +343,15 @@ public final class HeadlessController {
         } catch {
             logger.warn("Failed to restore preferred main display before virtual display cleanup: \(error.localizedDescription)")
         }
+
+        let stabilizationSeconds = Double(timing.effectiveRestorePostPromoteStabilizationMilliseconds) / 1000.0
+        if stabilizationSeconds > 0 {
+            logger.info("Waiting \(timing.effectiveRestorePostPromoteStabilizationMilliseconds)ms after physical display promotion before closing virtual display.")
+            Thread.sleep(forTimeInterval: stabilizationSeconds)
+        }
+
+        setPhase(.stoppingVirtualDisplay)
+        virtualDisplayManager.destroyVirtualDisplayIfManaged()
 
         setPhase(.restoringTouchBar)
         let touchBarResult = touchBarManager.showIfNeeded(state.touchBarHidden)
@@ -351,11 +369,8 @@ public final class HeadlessController {
             logger.warn(restoreResult.message)
         }
 
-        setPhase(.stoppingVirtualDisplay)
-        virtualDisplayManager.destroyVirtualDisplayIfManaged()
         setPhase(.stoppingKeepAwake)
         sleepManager.disableKeepAwake()
-        let timing = configManager.load().effectiveTiming
         let cooldownSeconds = afterPausedRestore ? timing.restoreCooldownAfterPausedSeconds : timing.restoreCooldownSeconds
         let cooldownUntil = Date().addingTimeInterval(TimeInterval(cooldownSeconds))
 
@@ -369,6 +384,38 @@ public final class HeadlessController {
         }
         let suffix = afterPausedRestore ? " after paused restore" : ""
         logger.info("Normal Mode restored\(suffix). Enable cooldown until \(ISO8601DateFormatter().string(from: cooldownUntil)), duration=\(cooldownSeconds)s.")
+    }
+
+    private func waitForRestorePriorityDisplayDuringGrace(
+        managedVirtualDisplayID: UInt32?,
+        timing: TimingConfig
+    ) -> DisplayInfo? {
+        let graceSeconds = timing.effectiveRestorePhysicalDisplayGraceSeconds
+        guard graceSeconds > 0 else {
+            logger.info("Final grace polling is disabled.")
+            return nil
+        }
+
+        let pollIntervalMilliseconds = max(50, timing.effectiveRestorePhysicalDisplayGracePollIntervalMilliseconds)
+        let deadline = Date().addingTimeInterval(TimeInterval(graceSeconds))
+        stateStore.update { state in
+            state.phase = .waitingForPhysicalDisplay
+            state.phaseMessage = "Final check for a physical display..."
+            state.phaseStartedAt = Date()
+            state.phaseDeadlineAt = deadline
+            state.lastProgressAt = Date()
+        }
+        logger.info("[Phase] waitingForPhysicalDisplay, grace=\(graceSeconds)s, pollInterval=\(pollIntervalMilliseconds)ms")
+
+        while Date() < deadline {
+            if let display = displayManager.restorePriorityDisplay(managedVirtualDisplayID: managedVirtualDisplayID) {
+                logger.info("Physical display became available during grace polling; continuing restore without entering paused state.")
+                return display
+            }
+            Thread.sleep(forTimeInterval: Double(pollIntervalMilliseconds) / 1000.0)
+        }
+
+        return displayManager.restorePriorityDisplay(managedVirtualDisplayID: managedVirtualDisplayID)
     }
 
     public func confirm() {

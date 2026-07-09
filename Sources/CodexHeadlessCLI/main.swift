@@ -34,7 +34,8 @@ func printUsage() {
       codex-headless config get confirm-dialog
       codex-headless config set confirm-dialog.enabled true|false
       codex-headless config get timing
-      codex-headless config set timing.KEY SECONDS
+      codex-headless config set timing.KEY VALUE
+      codex-headless config reset defaults
       codex-headless config get keep-awake-backend
       codex-headless config set keep-awake-backend caffeinate|native
       codex-headless doctor
@@ -592,7 +593,7 @@ do {
 
     case "config":
         guard args.count >= 3 else {
-            fail("Usage: codex-headless config get resolution|scale-mode|virtual-display-policy|soft-disconnect|keep-awake-backend|touchbar-hide|hotkeys|confirm-dialog|timing | config set resolution WIDTHxHEIGHT | config set scale-mode standard|hidpi | config set virtual-display-policy auto|always|off | config set soft-disconnect on|off | config set keep-awake-backend caffeinate|native | config set touchbar-hide on|off | config set hotkeys.enabled true|false | config set confirm-dialog.enabled true|false | config set timing.KEY SECONDS | config reset soft-disconnect-block")
+            fail("Usage: codex-headless config get resolution|scale-mode|virtual-display-policy|soft-disconnect|keep-awake-backend|touchbar-hide|hotkeys|confirm-dialog|timing | config set resolution WIDTHxHEIGHT | config set scale-mode standard|hidpi | config set virtual-display-policy auto|always|off | config set soft-disconnect on|off | config set keep-awake-backend caffeinate|native | config set touchbar-hide on|off | config set hotkeys.enabled true|false | config set confirm-dialog.enabled true|false | config set timing.KEY VALUE | config reset defaults|soft-disconnect-block")
         }
         let action = args[1]
         let key = args[2]
@@ -602,8 +603,11 @@ do {
             "timing.softDisconnectDisappearWaitSeconds",
             "timing.restoreBuiltInShortWaitSeconds",
             "timing.restorePhysicalDisplayWaitSeconds",
+            "timing.restorePhysicalDisplayGraceSeconds",
+            "timing.restorePhysicalDisplayGracePollIntervalMilliseconds",
             "timing.restoreCooldownSeconds",
-            "timing.restoreCooldownAfterPausedSeconds"
+            "timing.restoreCooldownAfterPausedSeconds",
+            "timing.restorePostPromoteStabilizationMilliseconds"
         ]
         guard key == "resolution"
             || key == "scale-mode"
@@ -616,6 +620,7 @@ do {
             || key == "hotkeys.enabled"
             || key == "confirm-dialog"
             || key == "confirm-dialog.enabled"
+            || key == "defaults"
             || key == "timing"
             || timingKeys.contains(key) else {
             fail("Unsupported config key: \(key)")
@@ -659,18 +664,23 @@ do {
                 print("softDisconnectDisappearWaitSeconds=\(timing.softDisconnectDisappearWaitSeconds)")
                 print("restoreBuiltInShortWaitSeconds=\(timing.restoreBuiltInShortWaitSeconds)")
                 print("restorePhysicalDisplayWaitSeconds=\(timing.restorePhysicalDisplayWaitSeconds)")
+                print("restorePhysicalDisplayGraceSeconds=\(timing.effectiveRestorePhysicalDisplayGraceSeconds)")
+                print("restorePhysicalDisplayGracePollIntervalMilliseconds=\(timing.effectiveRestorePhysicalDisplayGracePollIntervalMilliseconds)")
                 print("restoreCooldownSeconds=\(timing.restoreCooldownSeconds)")
                 print("restoreCooldownAfterPausedSeconds=\(timing.restoreCooldownAfterPausedSeconds)")
+                print("restorePostPromoteStabilizationMilliseconds=\(timing.effectiveRestorePostPromoteStabilizationMilliseconds)")
+            } else if key == "defaults" {
+                fail("Usage: codex-headless config reset defaults")
             } else {
                 print("soft-disconnect-block=\(config.softDisconnectBlockedReason ?? "none")")
             }
         case "set":
             guard args.count == 4 else {
-                fail("Usage: codex-headless config set resolution WIDTHxHEIGHT | config set scale-mode standard|hidpi | config set virtual-display-policy auto|always|off | config set soft-disconnect on|off | config set keep-awake-backend caffeinate|native | config set touchbar-hide on|off | config set hotkeys.enabled true|false | config set confirm-dialog.enabled true|false | config set timing.KEY SECONDS")
+                fail("Usage: codex-headless config set resolution WIDTHxHEIGHT | config set scale-mode standard|hidpi | config set virtual-display-policy auto|always|off | config set soft-disconnect on|off | config set keep-awake-backend caffeinate|native | config set touchbar-hide on|off | config set hotkeys.enabled true|false | config set confirm-dialog.enabled true|false | config set timing.KEY VALUE")
             }
             if timingKeys.contains(key) {
                 guard let seconds = Int(args[3]) else {
-                    fail("Usage: codex-headless config set \(key) SECONDS")
+                    fail("Usage: codex-headless config set \(key) VALUE")
                 }
                 let timingKey = String(key.dropFirst("timing.".count))
                 try configManager.setTimingValue(key: timingKey, seconds: seconds)
@@ -718,15 +728,24 @@ do {
                 let enabled = parseBool(args[3], usage: "Usage: codex-headless config set confirm-dialog.enabled true|false")
                 try configManager.setConfirmDialogEnabled(enabled)
                 print("confirm-dialog.enabled=\(enabled)")
+            } else if key == "defaults" {
+                fail("Usage: codex-headless config reset defaults")
             } else {
                 fail("Usage: codex-headless config reset soft-disconnect-block")
             }
         case "reset":
-            guard key == "soft-disconnect-block" else {
-                fail("Usage: codex-headless config reset soft-disconnect-block")
+            guard args.count == 3 else {
+                fail("Usage: codex-headless config reset defaults|soft-disconnect-block")
             }
-            try configManager.clearSoftDisconnectBlock()
-            print("soft-disconnect-block=cleared")
+            if key == "soft-disconnect-block" {
+                try configManager.clearSoftDisconnectBlock()
+                print("soft-disconnect-block=cleared")
+            } else if key == "defaults" {
+                try configManager.resetConfigToDefault()
+                print("config=defaults")
+            } else {
+                fail("Usage: codex-headless config reset defaults|soft-disconnect-block")
+            }
         default:
             fail("Unsupported config action: \(action)")
         }

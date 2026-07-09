@@ -16,8 +16,11 @@ final class StatusBarController: NSObject {
     private let launchAgentManager = LaunchAgentManager()
     private lazy var hotkeyManager = HotkeyManager(logger: logger)
     private lazy var confirmDialogController = ConfirmDialogController(logger: logger)
+    private let restoreOverlayController = RestoreProgressOverlayController()
+    private let controllerQueue = DispatchQueue(label: "CodexHeadless.controller-operation")
     private var timer: Timer?
     private var lastHotkeysEnabled: Bool?
+    private var controllerOperationInFlight = false
 
     override init() {
         super.init()
@@ -26,13 +29,14 @@ final class StatusBarController: NSObject {
         configureHotkeysIfNeeded(force: true)
         rebuildMenu()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.controller.rollbackIfNeeded()
+            self?.scheduleRollbackIfNeeded(source: "timer")
             self?.controller.continuePausedRestoreIfReady()
             self?.controller.syncKeepAwakeWithState()
             self?.controller.syncVirtualDisplayState()
             self?.controller.refreshPhaseIfNeeded()
             self?.configureHotkeysIfNeeded()
             self?.syncConfirmDialogWithState()
+            self?.syncRestoreOverlayWithState()
             self?.rebuildMenu()
         }
 
@@ -71,7 +75,7 @@ final class StatusBarController: NSObject {
     }
 
     private func rebuildMenu() {
-        controller.rollbackIfNeeded()
+        scheduleRollbackIfNeeded(source: "menu")
         updateTitle()
 
         let state = stateStore.load()
@@ -87,6 +91,9 @@ final class StatusBarController: NSObject {
         menu.addItem(disabledItem("Virtual Display: \(state.virtualDisplayCreated ? "Active" : "Inactive")"))
         menu.addItem(disabledItem("Built-in: \(builtInHandlingSummary(state: state))"))
         menu.addItem(disabledItem("Touch Bar: \(state.touchBarHidden == true ? "Hidden" : "Active")"))
+        if controllerOperationInFlight {
+            menu.addItem(disabledItem("Operation: Running..."))
+        }
         addPhaseItems(to: menu, state: state)
         menu.addItem(.separator())
 
@@ -106,12 +113,14 @@ final class StatusBarController: NSObject {
             menu.addItem(disabledItem("Shortcut: ⌃⌥⌘⇧R"))
             menu.addItem(.separator())
             menu.addItem(menuItem("Apply Recommended v0.5 Config", #selector(applyRecommendedV05Config)))
+            menu.addItem(menuItem("Reset All Settings to Default...", #selector(resetAllSettingsToDefault)))
             menu.addItem(virtualDisplayMenu(config: config))
             menu.addItem(displaySafetyMenu(config: config))
             menu.addItem(menuItem(state.keepAwake ? "Keep Awake: On" : "Keep Awake: Off", #selector(toggleKeepAwake)))
             menu.addItem(keepAwakeBackendMenu(config: config))
             menu.addItem(hotkeysMenu(config: config))
             menu.addItem(confirmDialogMenu(config: config))
+            menu.addItem(timingMenu(config: config))
             menu.addItem(menuItem(launchAgentManager.isEnabled() ? "Start at Login: On" : "Start at Login: Off", #selector(toggleStartAtLogin)))
         }
 
@@ -253,6 +262,101 @@ final class StatusBarController: NSObject {
         return item
     }
 
+    private func timingMenu(config: AppConfig) -> NSMenuItem {
+        let timing = config.effectiveTiming
+        let item = NSMenuItem(title: "Timing", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        submenu.addItem(disabledItem("Virtual Display Enumeration: \(timing.virtualDisplayEnumerationWaitSeconds)s"))
+        submenu.addItem(disabledItem("Reported ID Extra Wait: \(timing.virtualDisplayReportedIDExtraWaitSeconds)s"))
+        submenu.addItem(disabledItem("Soft Disconnect Verify: \(timing.softDisconnectDisappearWaitSeconds)s"))
+        submenu.addItem(disabledItem("Restore Built-in Short Wait: \(timing.restoreBuiltInShortWaitSeconds)s"))
+        submenu.addItem(disabledItem("Restore Physical Wait: \(timing.restorePhysicalDisplayWaitSeconds)s"))
+        submenu.addItem(disabledItem("Restore Grace: \(timing.effectiveRestorePhysicalDisplayGraceSeconds)s"))
+        submenu.addItem(disabledItem("Grace Poll Interval: \(timing.effectiveRestorePhysicalDisplayGracePollIntervalMilliseconds)ms"))
+        submenu.addItem(disabledItem("Post-promote Stabilization: \(timing.effectiveRestorePostPromoteStabilizationMilliseconds)ms"))
+        submenu.addItem(disabledItem("Restore Cooldown: \(timing.restoreCooldownSeconds)s"))
+        submenu.addItem(disabledItem("Paused Restore Cooldown: \(timing.restoreCooldownAfterPausedSeconds)s"))
+
+        submenu.addItem(.separator())
+        submenu.addItem(timingPresetMenu(
+            title: "Restore Physical Display Wait",
+            key: "restorePhysicalDisplayWaitSeconds",
+            currentValue: timing.restorePhysicalDisplayWaitSeconds,
+            presets: [5, 10, 15, 20, 30],
+            suffix: "s"
+        ))
+        submenu.addItem(timingPresetMenu(
+            title: "Restore Physical Display Grace",
+            key: "restorePhysicalDisplayGraceSeconds",
+            currentValue: timing.effectiveRestorePhysicalDisplayGraceSeconds,
+            presets: [0, 1, 2, 3, 5],
+            suffix: "s"
+        ))
+        submenu.addItem(timingPresetMenu(
+            title: "Grace Poll Interval",
+            key: "restorePhysicalDisplayGracePollIntervalMilliseconds",
+            currentValue: timing.effectiveRestorePhysicalDisplayGracePollIntervalMilliseconds,
+            presets: [100, 250, 500, 1000],
+            suffix: "ms"
+        ))
+        submenu.addItem(timingPresetMenu(
+            title: "Post-promote Stabilization",
+            key: "restorePostPromoteStabilizationMilliseconds",
+            currentValue: timing.effectiveRestorePostPromoteStabilizationMilliseconds,
+            presets: [0, 500, 750, 1000, 1500],
+            suffix: "ms"
+        ))
+        submenu.addItem(timingPresetMenu(
+            title: "Restore Cooldown",
+            key: "restoreCooldownSeconds",
+            currentValue: timing.restoreCooldownSeconds,
+            presets: [5, 10, 20, 30],
+            suffix: "s"
+        ))
+        submenu.addItem(timingPresetMenu(
+            title: "Paused Restore Cooldown",
+            key: "restoreCooldownAfterPausedSeconds",
+            currentValue: timing.restoreCooldownAfterPausedSeconds,
+            presets: [10, 20, 30, 45],
+            suffix: "s"
+        ))
+
+        submenu.addItem(.separator())
+        submenu.addItem(menuItem("Copy Timing Config Debug Info", #selector(copyTimingConfigDebugInfo)))
+        submenu.addItem(menuItem("Open Config Folder", #selector(openConfigFolder)))
+        submenu.addItem(menuItem("Reset Timing to Default", #selector(resetTimingToDefault)))
+
+        item.submenu = submenu
+        return item
+    }
+
+    private func timingPresetMenu(
+        title: String,
+        key: String,
+        currentValue: Int,
+        presets: [Int],
+        suffix: String
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for value in presets {
+            let label = value == 0 ? "Off" : "\(value)\(suffix)"
+            let presetItem = NSMenuItem(title: label, action: #selector(selectTimingPreset(_:)), keyEquivalent: "")
+            presetItem.target = self
+            presetItem.representedObject = "\(key)=\(value)"
+            presetItem.state = value == currentValue ? .on : .off
+            submenu.addItem(presetItem)
+        }
+        submenu.addItem(.separator())
+        let customItem = NSMenuItem(title: "Custom...", action: #selector(customTimingValue(_:)), keyEquivalent: "")
+        customItem.target = self
+        customItem.representedObject = "\(key)|\(currentValue)|\(suffix)|\(title)"
+        submenu.addItem(customItem)
+        item.submenu = submenu
+        return item
+    }
+
     private func keepAwakeBackendMenu(config: AppConfig) -> NSMenuItem {
         let current = config.keepAwakeBackend ?? .caffeinate
         let item = NSMenuItem(title: "Keep Awake Backend", action: nil, keyEquivalent: "")
@@ -353,6 +457,11 @@ final class StatusBarController: NSObject {
         }
     }
 
+    private func syncRestoreOverlayWithState() {
+        let state = stateStore.load()
+        restoreOverlayController.update(state: state)
+    }
+
     private func showConfirmDialogIfNeeded(state: RuntimeState, config: ConfirmDialogConfig) {
         guard state.mode == .confirmRequired, config.enabled else {
             return
@@ -400,6 +509,22 @@ final class StatusBarController: NSObject {
         enableHeadlessFromSource(source)
     }
 
+    private func scheduleRollbackIfNeeded(source: String) {
+        let state = stateStore.load()
+        guard !state.rollbackConfirmed,
+              let deadline = state.rollbackDeadline,
+              deadline <= Date() else {
+            return
+        }
+        guard !controllerOperationInFlight else {
+            return
+        }
+
+        runControllerOperation(name: "auto rollback", source: source) { [controller] in
+            controller.rollbackIfNeeded()
+        }
+    }
+
     private func handleConfirmRequested(source: String) {
         let state = stateStore.load()
         logger.info("[State] confirm requested, source=\(source), current=\(state.mode.rawValue)")
@@ -417,32 +542,68 @@ final class StatusBarController: NSObject {
         logger.info("[State] restore requested, source=\(source), current=\(state.mode.rawValue)")
         switch state.mode {
         case .preparing, .confirmRequired, .headless, .fallback, .restoring, .error:
-            controller.restoreNormal()
             confirmDialogController.dismiss(reason: "restored by \(source)")
-            rebuildMenu()
+            runControllerOperation(name: "restore", source: source) { [controller] in
+                controller.restoreNormal()
+            }
         case .normal:
             logger.info("[State] restore cleanup requested, source=\(source), current=Normal")
-            controller.restoreNormal()
-            rebuildMenu()
+            runControllerOperation(name: "restore cleanup", source: source) { [controller] in
+                controller.restoreNormal()
+            }
         }
     }
 
     private func enableHeadlessFromSource(_ source: String) {
-        do {
+        runControllerOperation(name: "enable", source: source, operation: { [controller, logger] in
             logger.info("[State] enable accepted, source=\(source)")
             try controller.enableHeadless()
-            let state = stateStore.load()
-            showConfirmDialogIfNeeded(state: state, config: configManager.load().effectiveConfirmDialog)
-        } catch {
-            let nsError = error as NSError
-            if nsError.domain != "CodexHeadless.VirtualDisplayUnavailable" {
-                markError(error)
-            } else {
-                logger.error(error.localizedDescription)
+        }, completion: { [weak self] result in
+            guard let self else {
+                return
             }
-            showAlert(title: "Enable Headless Mode Failed", message: error.localizedDescription)
+            switch result {
+            case .success:
+                let state = self.stateStore.load()
+                self.showConfirmDialogIfNeeded(state: state, config: self.configManager.load().effectiveConfirmDialog)
+            case .failure(let error):
+                let nsError = error as NSError
+                if nsError.domain != "CodexHeadless.VirtualDisplayUnavailable" {
+                    self.markError(error)
+                } else {
+                    self.logger.error(error.localizedDescription)
+                }
+                self.showAlert(title: "Enable Headless Mode Failed", message: error.localizedDescription)
+            }
+        })
+    }
+
+    private func runControllerOperation(
+        name: String,
+        source: String,
+        operation: @escaping () throws -> Void,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        guard !controllerOperationInFlight else {
+            logger.warn("[State] \(name) ignored, source=\(source), another controller operation is running")
+            showAlert(title: "CodexHeadless Is Busy", message: "Another display operation is already running. Please wait for it to finish.")
+            return
         }
+
+        controllerOperationInFlight = true
         rebuildMenu()
+
+        controllerQueue.async { [weak self] in
+            let result = Result { try operation() }
+            DispatchQueue.main.async {
+                guard let self else {
+                    return
+                }
+                self.controllerOperationInFlight = false
+                completion?(result)
+                self.rebuildMenu()
+            }
+        }
     }
 
     @objc private func enableHeadless() {
@@ -566,6 +727,65 @@ final class StatusBarController: NSObject {
         rebuildMenu()
     }
 
+    @objc private func selectTimingPreset(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let separator = rawValue.firstIndex(of: "="),
+              let value = Int(rawValue[rawValue.index(after: separator)...]) else {
+            return
+        }
+
+        let key = String(rawValue[..<separator])
+        do {
+            try configManager.setTimingValue(key: key, seconds: value)
+        } catch {
+            showAlert(title: "Timing Update Failed", message: error.localizedDescription)
+        }
+        rebuildMenu()
+    }
+
+    @objc private func customTimingValue(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String else {
+            return
+        }
+
+        let parts = rawValue.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 4,
+              let currentValue = Int(parts[1]) else {
+            return
+        }
+
+        let key = parts[0]
+        let suffix = parts[2]
+        let title = parts[3]
+        let isMilliseconds = key.hasSuffix("Milliseconds")
+        let maxValue = isMilliseconds ? 10_000 : 120
+
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = "Enter a custom value in \(suffix). Valid range: 0-\(maxValue)."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(string: String(currentValue))
+        input.placeholderString = suffix
+        input.frame = NSRect(x: 0, y: 0, width: 220, height: 24)
+        alert.accessoryView = input
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            do {
+                guard let value = Int(input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                    throw NSError(domain: "CodexHeadless.TimingInput", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "Enter a whole number from 0 to \(maxValue)."
+                    ])
+                }
+                try configManager.setTimingValue(key: key, seconds: value)
+            } catch {
+                showAlert(title: "Timing Update Failed", message: error.localizedDescription)
+            }
+        }
+        rebuildMenu()
+    }
+
     @objc private func clearSoftDisconnectBlock() {
         do {
             try configManager.clearSoftDisconnectBlock()
@@ -585,6 +805,27 @@ final class StatusBarController: NSObject {
             try configManager.setKeepAwakeBackend(.caffeinate)
         } catch {
             showAlert(title: "Recommended Config Failed", message: error.localizedDescription)
+        }
+        rebuildMenu()
+    }
+
+    @objc private func resetAllSettingsToDefault() {
+        let alert = NSAlert()
+        alert.messageText = "Reset All Settings to Default?"
+        alert.informativeText = "This resets CodexHeadless configuration to the built-in defaults. It does not change the current runtime state; use Restore Normal Mode if Headless Mode is active."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        do {
+            try configManager.resetConfigToDefault()
+            configureHotkeysIfNeeded(force: true)
+        } catch {
+            showAlert(title: "Reset Defaults Failed", message: error.localizedDescription)
         }
         rebuildMenu()
     }
@@ -652,6 +893,33 @@ final class StatusBarController: NSObject {
         NSWorkspace.shared.open(CodexHeadlessPaths.supportDirectory)
     }
 
+    @objc private func copyTimingConfigDebugInfo() {
+        let timing = configManager.load().effectiveTiming
+        let text = """
+        virtualDisplayEnumerationWaitSeconds=\(timing.virtualDisplayEnumerationWaitSeconds)
+        virtualDisplayReportedIDExtraWaitSeconds=\(timing.virtualDisplayReportedIDExtraWaitSeconds)
+        softDisconnectDisappearWaitSeconds=\(timing.softDisconnectDisappearWaitSeconds)
+        restoreBuiltInShortWaitSeconds=\(timing.restoreBuiltInShortWaitSeconds)
+        restorePhysicalDisplayWaitSeconds=\(timing.restorePhysicalDisplayWaitSeconds)
+        restorePhysicalDisplayGraceSeconds=\(timing.effectiveRestorePhysicalDisplayGraceSeconds)
+        restorePhysicalDisplayGracePollIntervalMilliseconds=\(timing.effectiveRestorePhysicalDisplayGracePollIntervalMilliseconds)
+        restorePostPromoteStabilizationMilliseconds=\(timing.effectiveRestorePostPromoteStabilizationMilliseconds)
+        restoreCooldownSeconds=\(timing.restoreCooldownSeconds)
+        restoreCooldownAfterPausedSeconds=\(timing.restoreCooldownAfterPausedSeconds)
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @objc private func resetTimingToDefault() {
+        do {
+            try configManager.resetTimingToDefault()
+        } catch {
+            showAlert(title: "Reset Timing Failed", message: error.localizedDescription)
+        }
+        rebuildMenu()
+    }
+
     @objc private func copyStatus() {
         let appStatus = appInteractionStatusText()
         NSPasteboard.general.clearContents()
@@ -713,6 +981,126 @@ final class StatusBarController: NSObject {
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()
+    }
+}
+
+final class RestoreProgressOverlayController {
+    private var panel: NSPanel?
+    private let titleLabel = NSTextField(labelWithString: "Restoring Normal Mode...")
+    private let bodyLabel = NSTextField(labelWithString: "")
+
+    func update(state: RuntimeState) {
+        let phase = RuntimePhaseFormatter.phase(state)
+        guard shouldShowOverlay(mode: state.mode, phase: phase) else {
+            close()
+            return
+        }
+
+        ensurePanel()
+        titleLabel.stringValue = title(for: phase)
+        bodyLabel.stringValue = body(for: state, phase: phase)
+        positionPanel()
+        panel?.orderFrontRegardless()
+    }
+
+    private func shouldShowOverlay(mode: HeadlessMode, phase: RuntimePhase) -> Bool {
+        guard mode == .restoring || phase == .restorePaused else {
+            return false
+        }
+
+        switch phase {
+        case .restoringBuiltInDisplay,
+             .waitingForPhysicalDisplay,
+             .restorePaused,
+             .promotingPhysicalDisplay,
+             .keepingExternalDisplayAsMain,
+             .stoppingVirtualDisplay:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func ensurePanel() {
+        guard panel == nil else {
+            return
+        }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 132),
+            styleMask: [.nonactivatingPanel, .hudWindow],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+
+        let content = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 360, height: 132))
+        titleLabel.frame = NSRect(x: 20, y: 82, width: 320, height: 24)
+        titleLabel.font = .boldSystemFont(ofSize: 16)
+        titleLabel.textColor = .white
+        bodyLabel.frame = NSRect(x: 20, y: 24, width: 320, height: 54)
+        bodyLabel.font = .systemFont(ofSize: 13)
+        bodyLabel.textColor = .white
+        bodyLabel.lineBreakMode = .byWordWrapping
+        bodyLabel.maximumNumberOfLines = 3
+        content.addSubview(titleLabel)
+        content.addSubview(bodyLabel)
+        panel.contentView = content
+        self.panel = panel
+    }
+
+    private func positionPanel() {
+        guard let panel else {
+            return
+        }
+
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        guard let frame = screen?.visibleFrame else {
+            return
+        }
+
+        let x = frame.midX - panel.frame.width / 2
+        let y = frame.maxY - panel.frame.height - 72
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    private func title(for phase: RuntimePhase) -> String {
+        switch phase {
+        case .restorePaused:
+            return "Restore is waiting for a physical display..."
+        case .stoppingVirtualDisplay:
+            return "Closing virtual display..."
+        default:
+            return "Restoring Normal Mode..."
+        }
+    }
+
+    private func body(for state: RuntimeState, phase: RuntimePhase) -> String {
+        let countdown: String
+        if let remaining = RuntimePhaseFormatter.deadlineRemainingSeconds(state) {
+            countdown = "\nTimeout: \(remaining)s"
+        } else {
+            countdown = ""
+        }
+
+        switch phase {
+        case .restorePaused:
+            return "The virtual display is kept alive for safety.\nPress Restore again after the built-in display appears."
+        case .stoppingVirtualDisplay:
+            return "Windows may move back to the built-in display shortly.\(countdown)"
+        default:
+            return "Switching back to physical display.\nVirtual display will close shortly.\(countdown)"
+        }
+    }
+
+    private func close() {
+        panel?.orderOut(nil)
     }
 }
 

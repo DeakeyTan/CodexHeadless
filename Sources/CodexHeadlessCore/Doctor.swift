@@ -90,6 +90,9 @@ public final class Doctor {
           Soft-disconnect disappear wait: \(config.effectiveTiming.softDisconnectDisappearWaitSeconds)s
           Restore built-in short wait: \(config.effectiveTiming.restoreBuiltInShortWaitSeconds)s
           Restore physical display wait: \(config.effectiveTiming.restorePhysicalDisplayWaitSeconds)s
+          Restore physical display grace: \(config.effectiveTiming.effectiveRestorePhysicalDisplayGraceSeconds)s
+          Restore grace poll interval: \(config.effectiveTiming.effectiveRestorePhysicalDisplayGracePollIntervalMilliseconds)ms
+          Restore post-promote stabilization: \(config.effectiveTiming.effectiveRestorePostPromoteStabilizationMilliseconds)ms
           Restore cooldown: \(config.effectiveTiming.restoreCooldownSeconds)s
           Restore paused cooldown: \(config.effectiveTiming.restoreCooldownAfterPausedSeconds)s
 

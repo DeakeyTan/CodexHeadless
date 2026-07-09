@@ -44,6 +44,135 @@ The current implementation targets the PRD's v0.5 path:
 - 配置文件：保存默认虚拟显示器分辨率。
 - 日志：写入 `~/Library/Logs/CodexHeadless.log`。
 
+## 快速开始
+
+日常使用建议优先使用安装后的菜单栏 App，CLI 作为 SSH 恢复入口保留。
+
+1. 安装或更新：
+
+   ```bash
+   ./scripts/install.sh
+   ```
+
+2. 打开 `/Applications/CodexHeadless.app`。
+
+3. 第一次使用前确认 SSH 可用，并至少能远程执行：
+
+   ```bash
+   codex-headless status
+   codex-headless off
+   ```
+
+4. 推荐默认配置已经内置：
+
+   - Virtual Display: `2560x1440 @ 60Hz`
+   - Scale Mode: `hidpi`
+   - Virtual Display Policy: `auto`
+   - Soft Disconnect: `on`
+   - Touch Bar Hide: `on`
+   - Keep Awake on Launch: `off`
+   - Keep Awake Backend: `caffeinate`
+   - Restore Physical Wait: `5s`
+   - Restore Grace: `5s`
+
+5. 点击菜单栏 `CH` → `Enable Headless Mode`，或按 `⌃⌥⌘⇧E`。
+
+6. 确认显示器、远程连接、Touch Bar 状态正常后，点击弹窗 `Confirm`，或按 `⌃⌥⌘⇧C`。
+
+7. 需要恢复时点击 `Restore Normal Mode`，或按 `⌃⌥⌘⇧R`。如果显示器恢复较慢，工具会先保留虚拟显示器，等物理显示器可用后再关闭虚拟显示器。
+
+## 状态栏菜单使用说明
+
+菜单栏图标会显示简短状态：
+
+- `CH`：Normal，未启用 Headless Mode。
+- `CH: Prep`：正在准备启用。
+- `CH: Wait`：等待确认，rollback guard 正在计时。
+- `CH: On`：Headless Mode 已确认。
+- `CH: Fall`：Fallback 状态，未完整进入理想 Headless 状态。
+- `CH: Restoring`：正在恢复 Normal Mode。
+- `CH: Cooldown`：刚恢复完成，短时间内暂缓再次 Enable。
+- `CH: Err`：出现错误，优先查看日志或执行 restore/off。
+
+菜单顶部状态项：
+
+- `Mode`：当前运行模式。
+- `Keep Awake`：当前是否由工具保持唤醒。
+- `Virtual Display`：本工具托管的软件虚拟显示器是否存在。
+- `Built-in`：内建屏当前处理方式，可能是 `Active`、`Dimmed` 或 `Soft-disconnected`。
+- `Touch Bar`：Touch Bar UI 是否被隐藏。
+- `Operation: Running...`：菜单或快捷键触发的 Enable/Restore 正在后台执行；此时菜单仍可打开，但新的重操作会被拒绝，避免显示器状态互相打架。
+- `Current Step` / `Elapsed` / `Timeout` / `Enable available in`：当前阶段、耗时、剩余等待时间和冷却倒计时。
+
+主要操作：
+
+- `Enable Headless Mode`：开启 Headless Mode。会启动 Keep Awake、按策略创建或使用替代显示器、处理内建屏和 Touch Bar，然后进入确认窗口。
+- `Confirm Headless Mode`：确认本次 Headless Mode 正常，取消自动 rollback。
+- `Rollback Now`：在确认窗口内立即恢复 Normal Mode。
+- `Restore Normal Mode`：恢复内建屏、Touch Bar、亮度、关闭本工具创建的虚拟显示器，并停止本工具管理的 Keep Awake。
+- `Apply Recommended v0.5 Config`：写入当前推荐配置。适合重置到已验证的目标机参数。
+- `Reset All Settings to Default...`：把配置文件恢复为代码内置默认值。它不会修改当前运行状态；如果已经处于 Headless Mode，请先执行 `Restore Normal Mode`。
+
+`Virtual Display` 子菜单：
+
+- `Policy: auto`：有外接屏或 HDMI Dummy 时优先使用现有物理替代显示器；没有替代显示器时才创建软件虚拟显示器。
+- `Policy: always`：每次 Enable 都创建软件虚拟显示器；如果已有外接屏或 Dummy，仍保持外接屏/Dummy 为主显示器。
+- `Policy: off`：不创建软件虚拟显示器。没有外接屏或 Dummy 时不会 soft-disconnect 唯一内建屏。
+- `Scale: standard`：标准缩放模式。
+- `Scale: hidpi`：HiDPI 模式。macOS 可能把 `2560x1440` backing 显示为 `1280x720` logical points，这是正常缩放表现。
+- `Preset: WIDTHxHEIGHT`：选择虚拟显示器 backing 分辨率。
+- `Custom Resolution...`：输入自定义虚拟显示器分辨率。宽高必须在允许范围内并且为偶数。
+
+`Display & Touch Bar Safety` 子菜单：
+
+- `Soft Disconnect: On/Off`：是否允许使用已验证的私有 API helper soft-disconnect 内建屏。关闭后会改用亮度 fallback。
+- `Touch Bar Hide: On/Off`：是否在 Headless Mode 中清空 Touch Bar Control Strip UI。它不是硬件断电，但 OLED 黑色区域不发光。
+- `Soft Disconnect Blocked` / `Clear Soft Disconnect Block`：如果私有 API helper 崩溃，工具会自动关闭 soft-disconnect 并记录 block reason；确认要重新实验时可清除。
+
+`Keep Awake Backend` 子菜单：
+
+- `caffeinate (CLI-safe)`：默认推荐。使用 macOS 自带 `/usr/bin/caffeinate`，CLI 退出后仍能保持唤醒。
+- `native (App only)`：使用 App 内 IOKit assertion，只适合菜单栏 App 常驻；CLI 场景会自动回退到 `caffeinate`。
+
+默认配置不会在菜单栏 App 启动时自动开启 Keep Awake。Keep Awake 会跟随 Headless 生命周期：`Enable Headless Mode` 时开启，`Restore Normal Mode` / `codex-headless off` 时关闭。菜单中的 `Keep Awake: On/Off` 可用于临时手动切换当前运行状态。
+
+`Hotkeys` 子菜单：
+
+- `Hotkeys: On/Off`：启用或关闭全局快捷键。
+- `Enable` / `Confirm` / `Restore`：显示当前快捷键和注册状态。默认分别是 `⌃⌥⌘⇧E`、`⌃⌥⌘⇧C`、`⌃⌥⌘⇧R`。
+
+`Confirm Dialog` 子菜单：
+
+- `Confirm Dialog: On/Off`：是否在进入 `Confirm Required` 后显示确认/回滚弹窗。
+- `Hotkey hints`：弹窗中是否显示快捷键提示。
+- `Countdown`：弹窗中是否显示 rollback 剩余时间。
+
+`Timing` 子菜单：
+
+- `Virtual Display Enumeration`：启动虚拟显示器后，等待 CoreGraphics 枚举到新显示器的时间。
+- `Reported ID Extra Wait`：虚拟显示器 host 已报告 displayID 但系统枚举较慢时，额外等待的时间。
+- `Soft Disconnect Verify`：soft-disconnect 内建屏后，等待内建屏从显示器列表消失的验证时间。
+- `Restore Built-in Short Wait`：restore 初期，在已知内建屏 ID 上做的短等待。
+- `Restore Physical Wait`：restore 时等待任意物理显示器恢复可用的主等待时间，默认 `5s`。
+- `Restore Grace`：主等待结束后最后一次 grace polling，默认 `5s`。它用于吸收 macOS 显示器枚举慢半拍的问题，减少进入 `restorePaused` 的概率。
+- `Grace Poll Interval`：grace polling 的轮询间隔，默认 `250ms`。
+- `Post-promote Stabilization`：物理显示器被设为主显示器后，关闭虚拟显示器前的稳定等待，默认 `500ms`。
+- `Restore Cooldown`：正常 restore 完成后，再次允许 Enable 前的冷却时间。
+- `Paused Restore Cooldown`：从 `restorePaused` 恢复完成后的冷却时间。
+- 每个 Timing 项都有预设和 `Custom...` 输入。秒级参数允许 `0-120`，毫秒级参数允许 `0-10000`。除调试外不建议设置为 `0`。
+- `Copy Timing Config Debug Info`：复制当前 Timing 配置，方便贴日志或 UAT 记录。
+- `Reset Timing to Default`：恢复代码内置默认 Timing。
+
+`Diagnostics` 子菜单：
+
+- `Copy Status`：复制 `codex-headless status` 等价状态和 App 交互状态。
+- `Copy Doctor Report`：复制只读诊断报告。
+- `Copy Self Test Report`：复制内置 self-test 报告。
+- `Open Log`：打开 `~/Library/Logs/CodexHeadless.log`。
+- `Open Config Folder`：打开配置和状态文件目录。
+
+菜单响应说明：Enable/Restore 涉及显示器枚举、等待和子进程清理。菜单栏 App 会把这些重操作放到后台串行队列，主线程只负责菜单、弹窗和状态刷新；因此长 restore 期间菜单应该仍可打开。如果看到 `Operation: Running...`，请等当前操作结束后再触发下一次 Enable/Restore。
+
 ## 安全边界
 
 这个版本仍然优先保证可恢复：
@@ -108,6 +237,7 @@ swift run codex-headless config get confirm-dialog
 swift run codex-headless config set confirm-dialog.enabled true
 swift run codex-headless config get keep-awake-backend
 swift run codex-headless config set keep-awake-backend caffeinate
+swift run codex-headless config reset defaults
 swift run codex-headless doctor
 swift run codex-headless self-test
 swift run codex-headless soft-disconnect check
@@ -121,6 +251,14 @@ swift run codex-headless confirm
 ```
 
 `on` 是幂等的：如果已经处于可用 Headless 状态，它会直接输出当前状态，不会重复发送亮度降低按键，也不会重启回滚计时。如果上次内建屏降暗失败，重新执行 `on` 会继续尝试 fallback。
+
+恢复默认配置：
+
+```bash
+codex-headless config reset defaults
+```
+
+这个命令只重置配置文件，不会主动改变当前显示器拓扑或运行状态。若当前已经启用 Headless Mode，请先执行 `codex-headless off`，再重置配置。
 
 如果超过确认时间，下一次菜单栏 App 定时检查或 CLI `status` 检查会触发恢复 Normal Mode。
 
@@ -171,6 +309,8 @@ codex-headless doctor
 ## Keep Awake Backend
 
 默认后端是 macOS 自带的 `/usr/bin/caffeinate`，适合 CLI 和 SSH 场景，因为 CLI 退出后 `caffeinate` 进程仍可继续保持系统唤醒。
+
+默认配置中 `keepAwakeOnLaunch=false`。单纯打开菜单栏 App 不会防休眠；`Enable Headless Mode` 会开启 Keep Awake，`Restore Normal Mode` / `codex-headless off` 会关闭本工具管理的 Keep Awake。
 
 也预留了 App 内原生 IOKit power assertion 后端：
 
@@ -398,12 +538,16 @@ Common restore phases include:
 - `restoringBuiltInDisplay`: Requesting the built-in display to return.
 - `waitingForPhysicalDisplay`: Waiting for a built-in, external, or HDMI Dummy display to become available.
 - `promotingPhysicalDisplay`: Setting the physical display as main before stopping the virtual display.
+- `stoppingVirtualDisplay`: Closing the managed software virtual display as soon as a physical display is promoted.
 - `restoringTouchBar`: Restoring Touch Bar UI.
-- `stoppingVirtualDisplay`: Stopping the managed software virtual display.
 - `stoppingKeepAwake`: Stopping Keep Awake.
 - `coolingDown`: Waiting for display state to stabilize before Enable is available again.
 
-When an external display or HDMI Dummy is already available, virtual display creation and virtual display wait phases are skipped unless `virtual-display-policy=always` requires a software virtual display. During restore, the managed virtual display remains alive until a physical display is available. `restorePaused` usually means CodexHeadless is still waiting safely, not that recovery has failed.
+When an external display or HDMI Dummy is already available, virtual display creation and virtual display wait phases are skipped unless `virtual-display-policy=always` requires a software virtual display. During restore, the managed virtual display remains alive until a physical display is available. Once a physical display is promoted, CodexHeadless waits briefly and then closes the virtual display before restoring Touch Bar UI and brightness, reducing the time windows can remain on the virtual display.
+
+If CoreGraphics is slow to enumerate the physical display, CodexHeadless performs a short final grace polling step before entering `restorePaused`. `restorePaused` usually means CodexHeadless is still waiting safely, not that recovery has failed.
+
+The menu bar app also shows a small non-blocking restore overlay during restore, waiting, paused restore, physical display promotion, and virtual display shutdown. This helps when the NSStatusItem temporarily appears on the virtual display or another Space during display topology changes.
 
 ## Timing Configuration
 
@@ -416,9 +560,12 @@ Timing values are optional. Existing config files that do not contain `timing` c
     "virtualDisplayReportedIDExtraWaitSeconds": 2,
     "softDisconnectDisappearWaitSeconds": 1,
     "restoreBuiltInShortWaitSeconds": 3,
-    "restorePhysicalDisplayWaitSeconds": 10,
-    "restoreCooldownSeconds": 10,
-    "restoreCooldownAfterPausedSeconds": 20
+    "restorePhysicalDisplayWaitSeconds": 5,
+    "restorePhysicalDisplayGraceSeconds": 5,
+    "restorePhysicalDisplayGracePollIntervalMilliseconds": 250,
+    "restorePostPromoteStabilizationMilliseconds": 500,
+    "restoreCooldownSeconds": 5,
+    "restoreCooldownAfterPausedSeconds": 5
   }
 }
 ```
@@ -428,10 +575,14 @@ CLI helpers:
 ```bash
 codex-headless config get timing
 codex-headless config set timing.virtualDisplayReportedIDExtraWaitSeconds 2
+codex-headless config set timing.restorePhysicalDisplayGraceSeconds 5
+codex-headless config set timing.restorePostPromoteStabilizationMilliseconds 750
 codex-headless config set timing.restoreCooldownSeconds 10
 ```
 
-Do not set wait durations to `0` unless debugging. If restore becomes unstable, increase `restorePhysicalDisplayWaitSeconds`. If virtual display creation is stable on the target machine, `virtualDisplayReportedIDExtraWaitSeconds` can be reduced carefully. The defaults are optimized for the current target machine and keep the CLI recovery path intact.
+The app menu includes a `Timing` submenu with presets for restore physical wait, grace polling, poll interval, post-promote stabilization, and cooldown values. Changes are written to `~/Library/Application Support/CodexHeadless/config.json` and can be verified with `codex-headless config get timing`.
+
+Do not set wait durations to `0` unless debugging. If restore becomes unstable, increase `restorePhysicalDisplayWaitSeconds` or `restorePhysicalDisplayGraceSeconds`. If virtual display creation is stable on the target machine, `virtualDisplayReportedIDExtraWaitSeconds` can be reduced carefully. The defaults are optimized for the current target machine and keep the CLI recovery path intact.
 
 ## Install
 
@@ -465,10 +616,11 @@ Do not set wait durations to `0` unless debugging. If restore becomes unstable, 
    swift run codex-headless status
    ```
 
-3. 设置默认远程桌面分辨率：
+3. 如需手动确认默认远程桌面参数，可设置为当前推荐默认值：
 
    ```bash
-   swift run codex-headless config set resolution 1920x1080
+   swift run codex-headless config set resolution 2560x1440
+   swift run codex-headless config set scale-mode hidpi
    ```
 
 4. 插入 HDMI Dummy Plug。
