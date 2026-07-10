@@ -232,6 +232,128 @@ public final class DisplayManager {
         return true
     }
 
+    public func restoreLayout(
+        from snapshot: DisplayLayoutSnapshot,
+        managedVirtualDisplayID: UInt32? = nil
+    ) throws -> DisplayLayoutRestoreResult {
+        let currentDisplays = displays().filter { $0.isActive }
+        let currentPhysicalDisplays = currentDisplays.filter {
+            !$0.isManagedVirtual && $0.id != managedVirtualDisplayID
+        }
+        let physicalSnapshotEntries = snapshot.displays.filter {
+            !$0.isManagedVirtual && $0.id != managedVirtualDisplayID
+        }
+        let matches = matchLayoutEntries(physicalSnapshotEntries, to: currentPhysicalDisplays)
+
+        guard !matches.isEmpty else {
+            let message = "No displays from the saved layout snapshot are currently active."
+            logger.warn(message)
+            return DisplayLayoutRestoreResult(
+                appliedCount: 0,
+                skippedCount: physicalSnapshotEntries.count,
+                message: message
+            )
+        }
+
+        var config: CGDisplayConfigRef?
+        let beginError = CGBeginDisplayConfiguration(&config)
+        guard beginError == .success, let config else {
+            throw NSError(domain: "CodexHeadless.DisplayLayout", code: Int(beginError.rawValue), userInfo: [
+                NSLocalizedDescriptionKey: "Failed to begin display layout restoration."
+            ])
+        }
+
+        for match in matches {
+            CGConfigureDisplayOrigin(
+                config,
+                CGDirectDisplayID(match.display.id),
+                Int32(match.entry.originX),
+                Int32(match.entry.originY)
+            )
+        }
+
+        moveManagedVirtualDisplayOutOfRestoredLayout(
+            config: config,
+            currentDisplays: currentDisplays,
+            matchedEntries: matches.map(\.entry),
+            managedVirtualDisplayID: managedVirtualDisplayID
+        )
+
+        let completeError = CGCompleteDisplayConfiguration(config, .permanently)
+        guard completeError == .success else {
+            throw NSError(domain: "CodexHeadless.DisplayLayout", code: Int(completeError.rawValue), userInfo: [
+                NSLocalizedDescriptionKey: "Failed to complete display layout restoration."
+            ])
+        }
+
+        let skippedCount = max(0, physicalSnapshotEntries.count - matches.count)
+        let message = "Restored display layout from snapshot: applied=\(matches.count), skipped=\(skippedCount)"
+        logger.info(message)
+        return DisplayLayoutRestoreResult(
+            appliedCount: matches.count,
+            skippedCount: skippedCount,
+            message: message
+        )
+    }
+
+    public func compactStatus(displays: [DisplayInfo]? = nil) -> String {
+        let currentDisplays = displays ?? self.displays()
+        return currentDisplays.map {
+            "\($0.id):\($0.typeLabel):\($0.width)x\($0.height):origin=\($0.originX),\($0.originY):main=\($0.isMain):active=\($0.isActive)"
+        }.joined(separator: ", ")
+    }
+
+    private func matchLayoutEntries(
+        _ entries: [DisplayLayoutEntry],
+        to displays: [DisplayInfo]
+    ) -> [(entry: DisplayLayoutEntry, display: DisplayInfo)] {
+        var usedDisplayIDs = Set<UInt32>()
+        var matches: [(entry: DisplayLayoutEntry, display: DisplayInfo)] = []
+
+        for entry in entries where entry.isActive {
+            if let exactMatch = displays.first(where: { $0.id == entry.id && !usedDisplayIDs.contains($0.id) }) {
+                matches.append((entry, exactMatch))
+                usedDisplayIDs.insert(exactMatch.id)
+                continue
+            }
+
+            if let signatureMatch = displays.first(where: { display in
+                !usedDisplayIDs.contains(display.id)
+                    && display.isBuiltIn == entry.isBuiltIn
+                    && display.vendorNumber == entry.vendorNumber
+                    && display.modelNumber == entry.modelNumber
+                    && display.width == entry.width
+                    && display.height == entry.height
+            }) {
+                matches.append((entry, signatureMatch))
+                usedDisplayIDs.insert(signatureMatch.id)
+            }
+        }
+
+        return matches
+    }
+
+    private func moveManagedVirtualDisplayOutOfRestoredLayout(
+        config: CGDisplayConfigRef,
+        currentDisplays: [DisplayInfo],
+        matchedEntries: [DisplayLayoutEntry],
+        managedVirtualDisplayID: UInt32?
+    ) {
+        guard let virtualDisplay = currentDisplays.first(where: {
+            $0.id == managedVirtualDisplayID || $0.isManagedVirtual
+        }) else {
+            return
+        }
+
+        let maxX = matchedEntries.map { $0.originX + $0.width }.max() ?? 0
+        CGConfigureDisplayOrigin(
+            config,
+            CGDirectDisplayID(virtualDisplay.id),
+            Int32(maxX),
+            0
+        )
+    }
+
     public func statusLines(managedVirtualDisplayID: UInt32? = nil) -> [String] {
         displays().map { display in
             let typeLabel = display.id == managedVirtualDisplayID ? "Managed Virtual" : display.typeLabel

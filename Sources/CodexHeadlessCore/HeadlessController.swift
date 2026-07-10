@@ -6,6 +6,7 @@ public final class HeadlessController {
     private let stateStore: StateStore
     private let sleepManager: SleepManager
     private let displayManager: DisplayManager
+    private let displayLayoutStore: DisplayLayoutStore
     private let builtInDisplayManager: BuiltInDisplayManager
     private let virtualDisplayManager: VirtualDisplayManager
     private let touchBarManager: TouchBarManager
@@ -17,6 +18,7 @@ public final class HeadlessController {
         stateStore: StateStore = StateStore(),
         sleepManager: SleepManager? = nil,
         displayManager: DisplayManager = DisplayManager(),
+        displayLayoutStore: DisplayLayoutStore? = nil,
         builtInDisplayManager: BuiltInDisplayManager = BuiltInDisplayManager(),
         virtualDisplayManager: VirtualDisplayManager = VirtualDisplayManager(),
         touchBarManager: TouchBarManager = TouchBarManager(),
@@ -33,6 +35,7 @@ public final class HeadlessController {
             processKind: keepAwakeProcessKind
         )
         self.displayManager = displayManager
+        self.displayLayoutStore = displayLayoutStore ?? DisplayLayoutStore(logger: logger)
         self.builtInDisplayManager = builtInDisplayManager
         self.virtualDisplayManager = virtualDisplayManager
         self.touchBarManager = touchBarManager
@@ -81,6 +84,10 @@ public final class HeadlessController {
         setPhase(.checkingDisplays)
         let displays = displayManager.displays()
         logger.info("Displays before headless: \(displays.map { "\($0.id):\($0.typeLabel):\($0.width)x\($0.height):main=\($0.isMain)" }.joined(separator: ", "))")
+        displayLayoutStore.saveCurrentLayout(
+            displayManager: displayManager,
+            reason: "before entering Headless Mode"
+        )
 
         let builtInDisplayID = displays.first { $0.isBuiltIn }?.id
         let existingExternalDisplayID = displayManager.preferredExternalDisplay()?.id
@@ -340,6 +347,7 @@ public final class HeadlessController {
             } else {
                 try displayManager.setMainDisplayToRestorePriority(managedVirtualDisplayID: state.virtualDisplayID)
             }
+            restoreSavedDisplayLayout(managedVirtualDisplayID: state.virtualDisplayID)
         } catch {
             logger.warn("Failed to restore preferred main display before virtual display cleanup: \(error.localizedDescription)")
         }
@@ -416,6 +424,21 @@ public final class HeadlessController {
         }
 
         return displayManager.restorePriorityDisplay(managedVirtualDisplayID: managedVirtualDisplayID)
+    }
+
+    private func restoreSavedDisplayLayout(managedVirtualDisplayID: UInt32?) {
+        logger.info("Displays before saved layout restore: \(displayManager.compactStatus())")
+        do {
+            let snapshot = try displayLayoutStore.loadMatching(displays: displayManager.displays())
+            let result = try displayManager.restoreLayout(
+                from: snapshot,
+                managedVirtualDisplayID: managedVirtualDisplayID
+            )
+            logger.info(result.message)
+            logger.info("Displays after saved layout restore: \(displayManager.compactStatus())")
+        } catch {
+            logger.warn("Saved display layout restore skipped: \(error.localizedDescription)")
+        }
     }
 
     public func confirm() {

@@ -18,6 +18,11 @@ func printUsage() {
       codex-headless off
       codex-headless confirm
       codex-headless log [--tail N]
+      codex-headless layout status
+      codex-headless layout backup
+      codex-headless layout restore
+      codex-headless layout export PATH
+      codex-headless layout import PATH
       codex-headless config get resolution
       codex-headless config set resolution WIDTHxHEIGHT
       codex-headless config get scale-mode
@@ -68,6 +73,11 @@ func parseBool(_ rawValue: String, usage: String) -> Bool {
     default:
         fail(usage)
     }
+}
+
+func fileURL(from path: String) -> URL {
+    let expandedPath = (path as NSString).expandingTildeInPath
+    return URL(fileURLWithPath: expandedPath)
 }
 
 func parseSoftDisconnectExperiment(_ args: [String]) throws -> SoftDisconnectExperimentRequest {
@@ -283,6 +293,77 @@ do {
             stateStore: stateStore
         )
         print(doctor.report())
+
+    case "layout":
+        guard args.count >= 2 else {
+            fail("Usage: codex-headless layout status|backup|restore|export PATH|import PATH")
+        }
+
+        let displayManager = DisplayManager(logger: logger)
+        let layoutStore = DisplayLayoutStore(logger: logger)
+        switch args[1] {
+        case "status":
+            guard args.count == 2 else {
+                fail("Usage: codex-headless layout status")
+            }
+            print("Display Layout")
+            print("--------------")
+            print(displayManager.statusLines(managedVirtualDisplayID: stateStore.load().virtualDisplayID).joined(separator: "\n"))
+            print("")
+            print("Snapshot: \(CodexHeadlessPaths.snapshotFile.path)")
+            print("Current Profile: \(DisplayLayoutStore.profileKey(for: displayManager.displays()))")
+        case "backup":
+            guard args.count == 2 else {
+                fail("Usage: codex-headless layout backup")
+            }
+            layoutStore.saveCurrentLayout(
+                displayManager: displayManager,
+                reason: "manual layout backup",
+                includeManagedVirtual: false
+            )
+            print("layout=backed-up path=\(CodexHeadlessPaths.snapshotFile.path)")
+        case "restore":
+            guard args.count == 2 else {
+                fail("Usage: codex-headless layout restore")
+            }
+            let snapshot = try layoutStore.loadMatching(displays: displayManager.displays())
+            let result = try displayManager.restoreLayout(
+                from: snapshot,
+                managedVirtualDisplayID: stateStore.load().virtualDisplayID
+            )
+            print("layout=restored profile=\(snapshot.profileKey) applied=\(result.appliedCount) skipped=\(result.skippedCount)")
+        case "export":
+            guard args.count == 3 else {
+                fail("Usage: codex-headless layout export PATH")
+            }
+            let exportStore = DisplayLayoutStore(
+                logger: logger,
+                fileURL: fileURL(from: args[2])
+            )
+            let snapshot = exportStore.capture(
+                from: displayManager.displays(),
+                reason: "manual layout export",
+                includeManagedVirtual: false
+            )
+            try exportStore.saveSingleSnapshot(snapshot)
+            print("layout=exported profile=\(snapshot.profileKey) path=\(fileURL(from: args[2]).path)")
+        case "import":
+            guard args.count == 3 else {
+                fail("Usage: codex-headless layout import PATH")
+            }
+            let importStore = DisplayLayoutStore(
+                logger: logger,
+                fileURL: fileURL(from: args[2])
+            )
+            let snapshot = try importStore.loadSingleSnapshot()
+            let result = try displayManager.restoreLayout(
+                from: snapshot,
+                managedVirtualDisplayID: stateStore.load().virtualDisplayID
+            )
+            print("layout=imported profile=\(snapshot.profileKey) applied=\(result.appliedCount) skipped=\(result.skippedCount)")
+        default:
+            fail("Usage: codex-headless layout status|backup|restore|export PATH|import PATH")
+        }
 
     case "self-test":
         let report = SelfTest.report()

@@ -11,6 +11,7 @@ CodexHeadless is a macOS menu bar utility and CLI for using a MacBook as a remot
 - [快速开始 / Quick Start](#快速开始--quick-start)
 - [菜单栏使用 / Menu Bar Usage](#菜单栏使用--menu-bar-usage)
 - [CLI 使用 / CLI Usage](#cli-使用--cli-usage)
+- [显示布局 / Display Layout](#显示布局--display-layout)
 - [配置项 / Configuration](#配置项--configuration)
 - [Timing 参数 / Timing Parameters](#timing-参数--timing-parameters)
 - [文件位置 / File Locations](#文件位置--file-locations)
@@ -29,6 +30,7 @@ CodexHeadless is a macOS menu bar utility and CLI for using a MacBook as a remot
 - 外接屏/Dummy 优先：有外接显示器或 HDMI Dummy 时优先保持它为主显示器。
 - 软件虚拟显示器：可按策略创建 `CGVirtualDisplay` 虚拟显示器。
 - 内建屏处理：有替代显示器时可 soft-disconnect 内建屏；失败时回退到亮度降低。
+- 显示布局备份：进入 Headless Mode 前按物理屏组合保存布局，恢复时尽量回放原来的排列。
 - Touch Bar 隐藏：可清空 Control Strip UI，让 OLED 区域黑屏。
 - 回滚保护：默认 30 秒确认窗口，未确认会自动恢复。
 - 日志：关键显示器、睡眠、恢复步骤都会写入日志。
@@ -41,6 +43,7 @@ English:
 - External/dummy display priority: keeps an external display or HDMI dummy plug as the main display when available.
 - Software virtual display: can create a `CGVirtualDisplay` based on policy.
 - Built-in display handling: soft-disconnects the built-in display when a safe alternative exists; falls back to brightness dimming.
+- Display layout backup: saves the physical display arrangement before Headless Mode and restores it when returning to Normal Mode.
 - Touch Bar hiding: clears the Control Strip UI so the OLED area is black.
 - Rollback guard: default 30-second confirmation window; restores automatically if not confirmed.
 - Logging: records key display, sleep, and restore operations.
@@ -169,6 +172,9 @@ codex-headless on
 codex-headless confirm
 codex-headless off
 codex-headless log --tail 100
+codex-headless layout status
+codex-headless layout backup
+codex-headless layout restore
 codex-headless doctor
 codex-headless self-test
 ```
@@ -180,6 +186,9 @@ codex-headless self-test
 - `confirm`：确认 Headless Mode。
 - `off`：恢复 Normal Mode。
 - `log --tail N`：查看最近 N 行日志。
+- `layout status`：查看当前显示器布局和当前物理屏组合 profile。
+- `layout backup`：手动备份当前物理屏布局。
+- `layout restore`：按当前物理屏组合恢复最近备份的布局。
 - `doctor`：只读诊断，不修改系统状态。
 - `self-test`：运行内置自测。
 
@@ -190,6 +199,9 @@ English:
 - `confirm`: confirms Headless Mode.
 - `off`: restores Normal Mode.
 - `log --tail N`: prints the latest N log lines.
+- `layout status`: shows the current display layout and physical-display profile.
+- `layout backup`: manually backs up the current physical display arrangement.
+- `layout restore`: restores the saved layout for the current physical-display profile.
 - `doctor`: read-only diagnostics; does not change system state.
 - `self-test`: runs built-in checks.
 
@@ -216,6 +228,40 @@ codex-headless config get timing
 codex-headless config set timing.restorePhysicalDisplayGraceSeconds 5
 codex-headless config reset defaults
 codex-headless config reset soft-disconnect-block
+```
+
+## 显示布局 / Display Layout
+
+中文：
+
+- `codex-headless on` 会在修改显示拓扑前保存当前物理屏布局。
+- `codex-headless off` 会在物理显示器恢复可用后、关闭本工具创建的虚拟显示器前，尝试恢复保存的布局。
+- 布局按物理屏组合保存：例如内建屏 A + 外接屏 B、内建屏 A + 外接屏 C 会分别保存，不会互相覆盖。
+- 物理屏组合 profile 使用内建/外接类型、vendor、model 和当前分辨率生成；同一组合再次备份会覆盖该组合的上一份布局。
+- 默认备份文件是一个布局库，适合自动恢复；`layout export PATH` 会导出当前组合的一份独立配置文件，适合手动保存或迁移。
+
+```bash
+codex-headless layout status
+codex-headless layout backup
+codex-headless layout restore
+codex-headless layout export ~/Desktop/codex-layout.json
+codex-headless layout import ~/Desktop/codex-layout.json
+```
+
+English:
+
+- `codex-headless on` saves the current physical display layout before changing display topology.
+- `codex-headless off` restores the saved layout after physical displays return and before the managed virtual display is closed.
+- Layouts are saved per physical-display profile: built-in A + external B and built-in A + external C are stored separately.
+- A profile is derived from built-in/external type, vendor, model, and current resolution; backing up the same profile replaces its previous layout.
+- The default snapshot file is a layout library for automatic restore; `layout export PATH` writes a standalone snapshot for manual backup or migration.
+
+```bash
+codex-headless layout status
+codex-headless layout backup
+codex-headless layout restore
+codex-headless layout export ~/Desktop/codex-layout.json
+codex-headless layout import ~/Desktop/codex-layout.json
 ```
 
 ## 配置项 / Configuration
@@ -320,6 +366,7 @@ English note: Do not set waits to `0` unless debugging. If restore is unstable, 
 | --- | --- |
 | 配置 / Config | `~/Library/Application Support/CodexHeadless/config.json` |
 | 运行状态 / Runtime state | `~/Library/Application Support/CodexHeadless/state.json` |
+| 显示布局 / Display layouts | `~/Library/Application Support/CodexHeadless/snapshot.json` |
 | 日志 / Log | `~/Library/Logs/CodexHeadless.log` |
 | CLI | `/usr/local/bin/codex-headless` |
 | App | `/Applications/CodexHeadless.app` |
@@ -332,6 +379,9 @@ English note: Do not set waits to `0` unless debugging. If restore is unstable, 
 - 私有 API 调用通过 helper 子进程执行，崩溃不会带崩主流程。
 - 只会停止本工具创建并记录 PID 的虚拟显示器 host。
 - 只会停止本工具管理的 `caffeinate` PID。
+- 显示布局恢复是 best-effort：如果某个显示器没有重新枚举、ID/硬件签名变化、分辨率变化导致 profile 不匹配，可能只能恢复部分布局。
+- 两台外接显示器 vendor、model、分辨率完全相同且系统 display ID 变化时，无法可靠区分左右位置，建议手动执行 `layout backup` 更新当前组合。
+- 如果用户在 Headless Mode 期间手动调整了系统显示器排列，`off` 会优先恢复进入 Headless Mode 前保存的布局。
 - Touch Bar hide 是清空 UI，不是硬件断电。
 - soft-disconnect、Touch Bar hide、软件虚拟显示器依赖 macOS 私有或半公开行为，系统更新后可能失效。
 - AppleScript 亮度 fallback 可能需要给 Terminal、iTerm 或 CodexHeadless 授予“辅助功能”权限。
@@ -342,6 +392,9 @@ English:
 - Private API calls run in helper subprocesses; helper crashes do not crash the main flow.
 - It only stops virtual display hosts created and recorded by CodexHeadless.
 - It only stops `caffeinate` PIDs managed by CodexHeadless.
+- Display layout restore is best-effort: if a display is not enumerated again, its ID/signature changes, or resolution changes make the profile mismatch, only a partial layout may be restored.
+- When two external displays share the same vendor, model, and resolution and macOS changes their display IDs, CodexHeadless cannot reliably distinguish left/right placement; run `layout backup` manually after arranging them.
+- If the user changes display arrangement manually while Headless Mode is active, `off` restores the layout saved before entering Headless Mode.
 - Touch Bar hiding clears UI; it is not hardware power-off.
 - Soft-disconnect, Touch Bar hiding, and software virtual display depend on private or semi-public macOS behavior and may break after macOS updates.
 - AppleScript brightness fallback may require Accessibility permission for Terminal, iTerm, or CodexHeadless.
