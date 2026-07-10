@@ -21,6 +21,7 @@ final class StatusBarController: NSObject {
     private var timer: Timer?
     private var lastHotkeysEnabled: Bool?
     private var controllerOperationInFlight = false
+    private var pendingRestoreSource: String?
 
     override init() {
         super.init()
@@ -85,6 +86,11 @@ final class StatusBarController: NSObject {
         menu.addItem(disabledItem("Mode: \(state.mode.rawValue)"))
         menu.addItem(disabledItem("Keep Awake: \(state.keepAwake ? "On" : "Off")"))
         menu.addItem(disabledItem("Virtual Display: \(state.virtualDisplayCreated ? "Active" : "Inactive")"))
+        if let replacementType = state.replacementDisplayType {
+            let ready = state.replacementDisplayReady == true ? "Ready" : "Preparing"
+            let promoted = state.replacementDisplayPromoted == true ? ", Main" : ""
+            menu.addItem(disabledItem("Replacement: \(replacementType) / \(ready)\(promoted)"))
+        }
         menu.addItem(disabledItem("Built-in: \(builtInHandlingSummary(state: state))"))
         menu.addItem(disabledItem("Touch Bar: \(state.touchBarHidden == true ? "Hidden" : "Active")"))
         if controllerOperationInFlight {
@@ -183,6 +189,20 @@ final class StatusBarController: NSObject {
         }
 
         submenu.addItem(.separator())
+        let handoff = config.effectiveDisplayHandoff
+        for behavior in SoftDisconnectFailureBehavior.allCases {
+            let handoffItem = NSMenuItem(
+                title: "On Disconnect Failure: \(behavior.rawValue)",
+                action: #selector(selectSoftDisconnectFailureBehavior(_:)),
+                keyEquivalent: ""
+            )
+            handoffItem.target = self
+            handoffItem.representedObject = behavior.rawValue
+            handoffItem.state = behavior == handoff.onSoftDisconnectFailure ? .on : .off
+            submenu.addItem(handoffItem)
+        }
+
+        submenu.addItem(.separator())
         for option in [true, false] {
             let title = option ? "Touch Bar Hide: On" : "Touch Bar Hide: Off"
             let touchBarItem = NSMenuItem(title: title, action: #selector(selectTouchBarHide(_:)), keyEquivalent: "")
@@ -240,8 +260,32 @@ final class StatusBarController: NSObject {
 
     private func confirmDialogMenu(config: AppConfig) -> NSMenuItem {
         let confirmDialog = config.effectiveConfirmDialog
-        let item = NSMenuItem(title: confirmDialog.enabled ? "Confirm Dialog: On" : "Confirm Dialog: Off", action: nil, keyEquivalent: "")
+        let confirmation = config.effectiveConfirmation
+        let item = NSMenuItem(title: "Confirmation: \(confirmation.policy.rawValue)", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
+
+        for policy in ConfirmationPolicy.allCases {
+            let policyItem = NSMenuItem(title: "Policy: \(policy.rawValue)", action: #selector(selectConfirmationPolicy(_:)), keyEquivalent: "")
+            policyItem.target = self
+            policyItem.representedObject = policy.rawValue
+            policyItem.state = policy == confirmation.policy ? .on : .off
+            submenu.addItem(policyItem)
+        }
+
+        submenu.addItem(.separator())
+        submenu.addItem(disabledItem("Timeout: \(confirmation.timeoutSeconds)s"))
+        for seconds in [15, 30, 45, 60] {
+            let timeoutItem = NSMenuItem(title: "Timeout: \(seconds)s", action: #selector(selectConfirmationTimeout(_:)), keyEquivalent: "")
+            timeoutItem.target = self
+            timeoutItem.representedObject = seconds
+            timeoutItem.state = seconds == confirmation.timeoutSeconds ? .on : .off
+            submenu.addItem(timeoutItem)
+        }
+        if confirmation.policy == .never {
+            submenu.addItem(disabledItem("Warning: automatic rollback confirmation is disabled."))
+        }
+
+        submenu.addItem(.separator())
 
         for option in [true, false] {
             let dialogItem = NSMenuItem(title: option ? "Confirm Dialog: On" : "Confirm Dialog: Off", action: #selector(selectConfirmDialogEnabled(_:)), keyEquivalent: "")
@@ -254,6 +298,7 @@ final class StatusBarController: NSObject {
         submenu.addItem(.separator())
         submenu.addItem(disabledItem("Hotkey hints: \(confirmDialog.showHotkeyHints ? "On" : "Off")"))
         submenu.addItem(disabledItem("Countdown: \(confirmDialog.showCountdown ? "On" : "Off")"))
+
         item.submenu = submenu
         return item
     }
@@ -536,6 +581,14 @@ final class StatusBarController: NSObject {
     private func handleRestoreRequested(source: String) {
         let state = stateStore.load()
         logger.info("[State] restore requested, source=\(source), current=\(state.mode.rawValue)")
+        if controllerOperationInFlight {
+            pendingRestoreSource = source
+            stateStore.update {
+                $0.enableCancellationRequested = true
+            }
+            logger.info("[State] restore queued with priority until the current display step returns, source=\(source)")
+            return
+        }
         switch state.mode {
         case .preparing, .confirmRequired, .headless, .fallback, .restoring, .error:
             confirmDialogController.dismiss(reason: "restored by \(source)")
@@ -551,11 +604,28 @@ final class StatusBarController: NSObject {
     }
 
     private func enableHeadlessFromSource(_ source: String) {
+        guard !controllerOperationInFlight else {
+            logger.warn("[State] enable ignored, source=\(source), another controller operation is running")
+            return
+        }
+        stateStore.update { state in
+            state.mode = .preparing
+            state.phase = .startingKeepAwake
+            state.phaseMessage = state.phase?.message
+            state.phaseStartedAt = Date()
+            state.lastProgressAt = Date()
+            state.enableCancellationRequested = false
+        }
+        rebuildMenu()
         runControllerOperation(name: "enable", source: source, operation: { [controller, logger] in
             logger.info("[State] enable accepted, source=\(source)")
             try controller.enableHeadless()
         }, completion: { [weak self] result in
             guard let self else {
+                return
+            }
+            guard self.pendingRestoreSource == nil else {
+                self.logger.info("[State] enable completion UI skipped because Restore is pending.")
                 return
             }
             switch result {
@@ -564,7 +634,12 @@ final class StatusBarController: NSObject {
                 self.showConfirmDialogIfNeeded(state: state, config: self.configManager.load().effectiveConfirmDialog)
             case .failure(let error):
                 let nsError = error as NSError
-                if nsError.domain != "CodexHeadless.VirtualDisplayUnavailable" {
+                let safelyRecoveredDomains = [
+                    "CodexHeadless.VirtualDisplayUnavailable",
+                    "CodexHeadless.DisplayHandoff",
+                    "CodexHeadless.EnableCancelled"
+                ]
+                if !safelyRecoveredDomains.contains(nsError.domain) {
                     self.markError(error)
                 } else {
                     self.logger.error(error.localizedDescription)
@@ -598,6 +673,10 @@ final class StatusBarController: NSObject {
                 self.controllerOperationInFlight = false
                 completion?(result)
                 self.rebuildMenu()
+                if let pendingRestoreSource = self.pendingRestoreSource {
+                    self.pendingRestoreSource = nil
+                    self.handleRestoreRequested(source: pendingRestoreSource)
+                }
             }
         }
     }
@@ -719,6 +798,42 @@ final class StatusBarController: NSObject {
         }
         if !enabled {
             confirmDialogController.dismiss(reason: "disabled by menu")
+        }
+        rebuildMenu()
+    }
+
+    @objc private func selectConfirmationPolicy(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String else {
+            return
+        }
+        do {
+            try configManager.setConfirmationPolicy(rawValue)
+        } catch {
+            showAlert(title: "Confirmation Policy Failed", message: error.localizedDescription)
+        }
+        rebuildMenu()
+    }
+
+    @objc private func selectConfirmationTimeout(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Int else {
+            return
+        }
+        do {
+            try configManager.setConfirmationTimeoutSeconds(seconds)
+        } catch {
+            showAlert(title: "Confirmation Timeout Failed", message: error.localizedDescription)
+        }
+        rebuildMenu()
+    }
+
+    @objc private func selectSoftDisconnectFailureBehavior(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String else {
+            return
+        }
+        do {
+            try configManager.setSoftDisconnectFailureBehavior(rawValue)
+        } catch {
+            showAlert(title: "Display Handoff Setting Failed", message: error.localizedDescription)
         }
         rebuildMenu()
     }

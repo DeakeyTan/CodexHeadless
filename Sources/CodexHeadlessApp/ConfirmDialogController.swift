@@ -40,7 +40,7 @@ final class ConfirmDialogController: NSObject, NSWindowDelegate {
 
         updateCountdown()
         logger.info("[Dialog] Show confirm dialog, timeout=\(config.timeoutSeconds)")
-        panel?.center()
+        positionOnVisibleScreen()
         panel?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
 
@@ -144,6 +144,25 @@ final class ConfirmDialogController: NSObject, NSWindowDelegate {
         }
         let seconds = max(0, Int(ceil(deadline.timeIntervalSinceNow)))
         countdownLabel.stringValue = "Auto rollback in \(seconds)s"
+    }
+
+    private func positionOnVisibleScreen() {
+        guard let panel else {
+            return
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        guard let screen else {
+            panel.center()
+            return
+        }
+        let visibleFrame = screen.visibleFrame
+        panel.setFrameOrigin(NSPoint(
+            x: visibleFrame.midX - panel.frame.width / 2,
+            y: visibleFrame.midY - panel.frame.height / 2
+        ))
     }
 
     @objc private func confirmClicked() {

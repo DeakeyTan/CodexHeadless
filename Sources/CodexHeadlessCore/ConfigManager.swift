@@ -110,8 +110,45 @@ public final class ConfigManager {
         var confirmDialog = config.effectiveConfirmDialog
         confirmDialog.enabled = enabled
         config.confirmDialog = confirmDialog
+        var confirmation = config.effectiveConfirmation
+        confirmation.dialogEnabled = enabled
+        config.confirmation = confirmation
         try save(config)
         logger.info("Configured Confirm/Rollback dialog: \(enabled ? "enabled" : "disabled")")
+    }
+
+    public func setConfirmationPolicy(_ rawValue: String) throws {
+        let policy = try ConfirmationPolicy.parse(rawValue)
+        var config = load()
+        var confirmation = config.effectiveConfirmation
+        confirmation.policy = policy
+        config.confirmation = confirmation
+        try save(config)
+        logger.info("Configured confirmation policy: \(policy.rawValue)")
+    }
+
+    public func setConfirmationTimeoutSeconds(_ timeoutSeconds: Int) throws {
+        guard timeoutSeconds >= 5, timeoutSeconds <= 300 else {
+            throw NSError(domain: "CodexHeadless.Confirmation", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid confirmation timeout: use 5 to 300 seconds."
+            ])
+        }
+        var config = load()
+        var confirmation = config.effectiveConfirmation
+        confirmation.timeoutSeconds = timeoutSeconds
+        config.confirmation = confirmation
+        try save(config)
+        logger.info("Configured confirmation timeout: \(timeoutSeconds)s")
+    }
+
+    public func setSoftDisconnectFailureBehavior(_ rawValue: String) throws {
+        let behavior = try SoftDisconnectFailureBehavior.parse(rawValue)
+        var config = load()
+        var displayHandoff = config.effectiveDisplayHandoff
+        displayHandoff.onSoftDisconnectFailure = behavior
+        config.displayHandoff = displayHandoff
+        try save(config)
+        logger.info("Configured soft-disconnect failure behavior: \(behavior.rawValue)")
     }
 
     public func setTimingValue(key: String, seconds: Int) throws {

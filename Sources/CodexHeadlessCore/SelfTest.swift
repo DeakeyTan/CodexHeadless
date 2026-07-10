@@ -16,6 +16,9 @@ public enum SelfTest {
             testRecommendedPresets(),
             testVirtualDisplayScaleModeParsing(),
             testVirtualDisplayPolicyParsing(),
+            testConfirmationPolicy(),
+            testDisplayHandoffDefaults(),
+            testLegacyConfigCompatibility(),
             testInteractionDefaults(),
             testKeepAwakeBackendParsing(),
             testHelperExecutableResolver(),
@@ -125,6 +128,59 @@ public enum SelfTest {
             )
         } catch {
             return SelfTestResult(name: "virtual display policy parsing", passed: false, detail: error.localizedDescription)
+        }
+    }
+
+    private static func testConfirmationPolicy() -> SelfTestResult {
+        do {
+            let always = try ConfirmationPolicy.parse("always")
+            let virtualOnly = try ConfirmationPolicy.parse("software-virtual-display-only")
+            let never = try ConfirmationPolicy.parse("NEVER")
+            let passed = always.requiresConfirmation(usedManagedVirtualDisplay: false)
+                && virtualOnly.requiresConfirmation(usedManagedVirtualDisplay: true)
+                && !virtualOnly.requiresConfirmation(usedManagedVirtualDisplay: false)
+                && !never.requiresConfirmation(usedManagedVirtualDisplay: true)
+                && ConfirmationConfig.default.policy == .softwareVirtualDisplayOnly
+            return SelfTestResult(
+                name: "confirmation policy",
+                passed: passed,
+                detail: "default=\(ConfirmationConfig.default.policy.rawValue), external=\(virtualOnly.requiresConfirmation(usedManagedVirtualDisplay: false)), virtual=\(virtualOnly.requiresConfirmation(usedManagedVirtualDisplay: true))"
+            )
+        } catch {
+            return SelfTestResult(name: "confirmation policy", passed: false, detail: error.localizedDescription)
+        }
+    }
+
+    private static func testDisplayHandoffDefaults() -> SelfTestResult {
+        let handoff = DisplayHandoffConfig.default
+        let passed = handoff.keepBuiltInMainDuringPreparation
+            && handoff.onSoftDisconnectFailure == .restore
+        return SelfTestResult(
+            name: "safe display handoff defaults",
+            passed: passed,
+            detail: "disconnectFailure=\(handoff.onSoftDisconnectFailure.rawValue)"
+        )
+    }
+
+    private static func testLegacyConfigCompatibility() -> SelfTestResult {
+        do {
+            let encoded = try JSONEncoder().encode(AppConfig.default)
+            guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+                throw NSError(domain: "CodexHeadless.SelfTest", code: 1)
+            }
+            object.removeValue(forKey: "confirmation")
+            object.removeValue(forKey: "displayHandoff")
+            let legacyData = try JSONSerialization.data(withJSONObject: object)
+            let decoded = try JSONDecoder().decode(AppConfig.self, from: legacyData)
+            let passed = decoded.effectiveConfirmation.policy == .softwareVirtualDisplayOnly
+                && decoded.effectiveDisplayHandoff.onSoftDisconnectFailure == .restore
+            return SelfTestResult(
+                name: "legacy config compatibility",
+                passed: passed,
+                detail: "confirmation=\(decoded.effectiveConfirmation.policy.rawValue), handoff=\(decoded.effectiveDisplayHandoff.onSoftDisconnectFailure.rawValue)"
+            )
+        } catch {
+            return SelfTestResult(name: "legacy config compatibility", passed: false, detail: error.localizedDescription)
         }
     }
 

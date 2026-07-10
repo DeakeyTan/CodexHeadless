@@ -2,11 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_EXECUTABLE_SOURCE="$ROOT_DIR/.build/release/CodexHeadless"
-CLI_EXECUTABLE_SOURCE="$ROOT_DIR/.build/release/codex-headless"
-APP_BUNDLE_SOURCE="$ROOT_DIR/.build/release/CodexHeadless.app"
+RELEASE_DIR="${CODEX_HEADLESS_RELEASE_DIR:-$ROOT_DIR/.build/release}"
+APP_EXECUTABLE_SOURCE="$RELEASE_DIR/CodexHeadless"
+CLI_EXECUTABLE_SOURCE="$RELEASE_DIR/codex-headless"
+APP_BUNDLE_SOURCE="${CODEX_HEADLESS_APP_BUNDLE_PATH:-$RELEASE_DIR/CodexHeadless.app}"
 ICON_SOURCE="$ROOT_DIR/icon.png"
 MIN_MACOS_VERSION="${CODEX_HEADLESS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-13.0}}"
+APP_VERSION="${CODEX_HEADLESS_VERSION:-0.5}"
 
 if [[ ! -x "$APP_EXECUTABLE_SOURCE" ]]; then
   echo "Missing release executable: $APP_EXECUTABLE_SOURCE" >&2
@@ -53,9 +55,9 @@ cat > "$APP_BUNDLE_SOURCE/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.5</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>0.5</string>
+    <string>$APP_VERSION</string>
     <key>LSMinimumSystemVersion</key>
     <string>$MIN_MACOS_VERSION</string>
     <key>LSUIElement</key>

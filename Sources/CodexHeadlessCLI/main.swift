@@ -38,6 +38,11 @@ func printUsage() {
       codex-headless config set hotkeys.enabled true|false
       codex-headless config get confirm-dialog
       codex-headless config set confirm-dialog.enabled true|false
+      codex-headless config get confirmation.policy
+      codex-headless config set confirmation.policy always|software-virtual-display-only|never
+      codex-headless config set confirmation.timeout-seconds SECONDS
+      codex-headless config get display-handoff
+      codex-headless config set display-handoff.on-soft-disconnect-failure restore|brightness-fallback
       codex-headless config get timing
       codex-headless config set timing.KEY VALUE
       codex-headless config reset defaults
@@ -271,7 +276,11 @@ do {
             }
         }
         try controller.enableHeadless(resolutionOverride: resolution, rollbackEnabled: rollbackEnabled)
-        print("Headless Mode requested. Run `codex-headless confirm` within the rollback window if the setup is good.")
+        if stateStore.load().mode == .confirmRequired {
+            print("Headless Mode requested. Run `codex-headless confirm` within the rollback window if the setup is good.")
+        } else {
+            print("Headless Mode enabled. Confirmation is not required by the current policy.")
+        }
         print("")
         print(controller.statusText())
 
@@ -282,8 +291,11 @@ do {
         print(controller.statusText())
 
     case "confirm":
-        controller.confirm()
-        print("Headless Mode confirmed.")
+        if controller.confirm() {
+            print("Headless Mode confirmed.")
+        } else {
+            print("Confirm ignored: current mode is \(stateStore.load().mode.rawValue).")
+        }
         print("")
         print(controller.statusText())
 
@@ -690,6 +702,11 @@ do {
             || key == "hotkeys.enabled"
             || key == "confirm-dialog"
             || key == "confirm-dialog.enabled"
+            || key == "confirmation"
+            || key == "confirmation.policy"
+            || key == "confirmation.timeout-seconds"
+            || key == "display-handoff"
+            || key == "display-handoff.on-soft-disconnect-failure"
             || key == "defaults"
             || key == "timing"
             || timingKeys.contains(key) else {
@@ -727,6 +744,21 @@ do {
                 print("confirm-dialog.show-countdown=\(confirmDialog.showCountdown)")
             } else if key == "confirm-dialog.enabled" {
                 print("confirm-dialog.enabled=\(config.effectiveConfirmDialog.enabled)")
+            } else if key == "confirmation" {
+                let confirmation = config.effectiveConfirmation
+                print("confirmation.policy=\(confirmation.policy.rawValue)")
+                print("confirmation.timeout-seconds=\(confirmation.timeoutSeconds)")
+                print("confirmation.dialog-enabled=\(confirmation.dialogEnabled)")
+            } else if key == "confirmation.policy" {
+                print("confirmation.policy=\(config.effectiveConfirmation.policy.rawValue)")
+            } else if key == "confirmation.timeout-seconds" {
+                print("confirmation.timeout-seconds=\(config.effectiveConfirmation.timeoutSeconds)")
+            } else if key == "display-handoff" {
+                let handoff = config.effectiveDisplayHandoff
+                print("Keep built-in main during preparation: \(handoff.keepBuiltInMainDuringPreparation ? "on" : "off")")
+                print("Soft-disconnect failure behavior: \(handoff.onSoftDisconnectFailure.rawValue)")
+            } else if key == "display-handoff.on-soft-disconnect-failure" {
+                print("display-handoff.on-soft-disconnect-failure=\(config.effectiveDisplayHandoff.onSoftDisconnectFailure.rawValue)")
             } else if key == "timing" {
                 let timing = config.effectiveTiming
                 print("virtualDisplayEnumerationWaitSeconds=\(timing.virtualDisplayEnumerationWaitSeconds)")
@@ -798,6 +830,20 @@ do {
                 let enabled = parseBool(args[3], usage: "Usage: codex-headless config set confirm-dialog.enabled true|false")
                 try configManager.setConfirmDialogEnabled(enabled)
                 print("confirm-dialog.enabled=\(enabled)")
+            } else if key == "confirmation.policy" {
+                let policy = try ConfirmationPolicy.parse(args[3])
+                try configManager.setConfirmationPolicy(policy.rawValue)
+                print("confirmation.policy=\(policy.rawValue)")
+            } else if key == "confirmation.timeout-seconds" {
+                guard let seconds = Int(args[3]) else {
+                    fail("Usage: codex-headless config set confirmation.timeout-seconds SECONDS")
+                }
+                try configManager.setConfirmationTimeoutSeconds(seconds)
+                print("confirmation.timeout-seconds=\(seconds)")
+            } else if key == "display-handoff.on-soft-disconnect-failure" {
+                let behavior = try SoftDisconnectFailureBehavior.parse(args[3])
+                try configManager.setSoftDisconnectFailureBehavior(behavior.rawValue)
+                print("display-handoff.on-soft-disconnect-failure=\(behavior.rawValue)")
             } else if key == "defaults" {
                 fail("Usage: codex-headless config reset defaults")
             } else {

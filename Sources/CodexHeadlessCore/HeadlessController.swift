@@ -43,7 +43,7 @@ public final class HeadlessController {
     }
 
     public func enableHeadless(resolutionOverride: Resolution? = nil, rollbackEnabled: Bool = true) throws {
-        logger.info("Enable Headless Mode requested.")
+        logger.info("[Enable] requested.")
         rollbackIfNeeded()
 
         var state = stateStore.load()
@@ -59,6 +59,7 @@ public final class HeadlessController {
             ])
         }
 
+        let enableAlreadyPreparedByApp = state.mode == .preparing
         state.mode = .preparing
         state.lastError = nil
         state.restoreCooldownUntil = nil
@@ -69,6 +70,16 @@ public final class HeadlessController {
         state.phaseStartedAt = Date()
         state.phaseDeadlineAt = nil
         state.lastProgressAt = Date()
+        state.builtInDisplayID = nil
+        state.builtInWasMain = nil
+        state.replacementDisplayID = nil
+        state.replacementDisplayType = nil
+        state.replacementDisplayReady = false
+        state.replacementDisplayPromoted = false
+        state.confirmationRequired = false
+        if !enableAlreadyPreparedByApp {
+            state.enableCancellationRequested = false
+        }
         try stateStore.save(state)
 
         let config = configManager.load()
@@ -89,50 +100,131 @@ public final class HeadlessController {
             reason: "before entering Headless Mode"
         )
 
-        let builtInDisplayID = displays.first { $0.isBuiltIn }?.id
+        let builtInDisplay = displays.first { $0.isBuiltIn }
+        let builtInDisplayID = builtInDisplay?.id
         let existingExternalDisplayID = displayManager.preferredExternalDisplay()?.id
         let hasExternal = displayManager.hasAlternativeDisplay()
-        var promotedExternal = false
-        var virtualDisplayID: UInt32?
-        if virtualDisplayPolicy == .always {
-            virtualDisplayID = try createSoftwareVirtualDisplay(resolution: resolution, config: config)
-            if let existingExternalDisplayID {
-                setPhase(.usingExternalDisplay)
-                logger.info("External display detected: displayID=\(existingExternalDisplayID)")
-                promotedExternal = try displayManager.setMainDisplay(id: existingExternalDisplayID, reason: "existing external/dummy display")
-            } else if let virtualDisplayID {
-                promotedExternal = promoteSoftwareVirtualDisplay(id: virtualDisplayID, resolution: resolution)
-            }
-            if !promotedExternal && hasExternal {
-                logger.warn("Software virtual display was not promoted; falling back to existing external/dummy display.")
-                setPhase(.promotingExternalDisplay)
-                promotedExternal = try displayManager.setMainDisplayToPreferredExternal()
-            }
-        } else if hasExternal {
-            setPhase(.usingExternalDisplay)
-            if let existingExternalDisplayID {
-                logger.info("External display detected: displayID=\(existingExternalDisplayID)")
-            }
-            promotedExternal = try displayManager.setMainDisplayToPreferredExternal()
-        } else if virtualDisplayPolicy == .auto {
-            virtualDisplayID = try createSoftwareVirtualDisplay(resolution: resolution, config: config)
-            if let virtualDisplayID {
-                promotedExternal = promoteSoftwareVirtualDisplay(id: virtualDisplayID, resolution: resolution)
-            }
-        } else {
-            logger.info("Software virtual display policy is off; no virtual display will be created.")
+        stateStore.update { runtime in
+            runtime.builtInDisplayID = builtInDisplayID
+            runtime.builtInWasMain = builtInDisplay?.isMain
         }
 
-        if !hasExternal && !promotedExternal {
-            let message = "No alternative display is active. Software virtual display did not become visible, so Headless Mode was not started."
-            logger.error(message)
+        // Prepare: create and validate a replacement while the built-in display stays available.
+        var virtualDisplayID: UInt32?
+        let shouldCreateVirtualDisplay = virtualDisplayPolicy == .always || (virtualDisplayPolicy == .auto && !hasExternal)
+        if shouldCreateVirtualDisplay {
+            do {
+                virtualDisplayID = try createSoftwareVirtualDisplay(resolution: resolution, config: config)
+            } catch {
+                let message = "Unable to create a usable virtual display. Normal Mode has been preserved."
+                logger.error("[VirtualDisplay] failed to create a usable replacement display: \(error.localizedDescription)")
+                cleanFailedEnable(message: message)
+                throw NSError(domain: "CodexHeadless.VirtualDisplayUnavailable", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: message
+                ])
+            }
+            if virtualDisplayID != nil {
+                setPhase(.validatingVirtualDisplay)
+            }
+        } else {
+            logger.info(hasExternal
+                ? "[VirtualDisplay] existing physical replacement is available; managed display is not required."
+                : "[VirtualDisplay] policy is off; no virtual display will be created.")
+        }
+
+        // A virtual host must not steal main-display status during preparation.
+        if builtInDisplay?.isMain == true,
+           let builtInDisplayID,
+           displayManager.display(id: builtInDisplayID)?.isMain == false {
+            let restoredBuiltInMain = (try? displayManager.setMainDisplay(
+                id: builtInDisplayID,
+                reason: "built-in display during preparation"
+            )) == true
+            guard restoredBuiltInMain,
+                  displayManager.display(id: builtInDisplayID)?.isMain == true else {
+                let message = "The built-in display could not remain the main display during preparation. Normal Mode has been preserved."
+                cleanFailedEnable(message: message)
+                throw NSError(domain: "CodexHeadless.DisplayHandoff", code: 6, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            logger.info("[Display] built-in display \(builtInDisplayID) remains main during preparation.")
+        } else if builtInDisplay?.isMain == true, let builtInDisplayID {
+            logger.info("[Display] built-in display \(builtInDisplayID) remains main during preparation.")
+        }
+
+        let replacementDisplayID: UInt32?
+        let replacementType: String?
+        let usedManagedVirtualDisplay: Bool
+        if let existingExternalDisplayID {
+            replacementDisplayID = existingExternalDisplayID
+            replacementType = "external"
+            usedManagedVirtualDisplay = false
+            setPhase(.preparingExternalDisplay)
+            logger.info("[Display] external replacement ready, displayID=\(existingExternalDisplayID).")
+        } else if let virtualDisplayID {
+            replacementDisplayID = virtualDisplayID
+            replacementType = "managedVirtual"
+            usedManagedVirtualDisplay = true
+            logger.info("[VirtualDisplay] replacement display ready, displayID=\(virtualDisplayID).")
+        } else {
+            replacementDisplayID = nil
+            replacementType = nil
+            usedManagedVirtualDisplay = false
+        }
+
+        guard let replacementDisplayID else {
+            let message = "Unable to create a usable replacement display. Normal Mode has been preserved."
+            logger.error("[Safety] built-in display remained active and main.")
             cleanFailedEnable(message: message)
             throw NSError(domain: "CodexHeadless.VirtualDisplayUnavailable", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: message
             ])
         }
 
+        setPhase(.replacementDisplayReady)
+        stateStore.update { runtime in
+            runtime.replacementDisplayID = replacementDisplayID
+            runtime.replacementDisplayType = replacementType
+            runtime.replacementDisplayReady = true
+        }
+
+        if stateStore.load().enableCancellationRequested == true {
+            let message = "Enable was cancelled by a Restore request. Normal Mode has been preserved."
+            logger.info("[Enable] cancelled before display handoff commit.")
+            cleanFailedEnable(message: message)
+            throw NSError(domain: "CodexHeadless.EnableCancelled", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+
+        // Commit: promotion and soft-disconnect intentionally run back-to-back.
+        setPhase(.committingDisplayHandoff)
+        logger.info("[Display] committing handoff to \(replacementType ?? "replacement") display \(replacementDisplayID).")
+        let promotedExternal: Bool
+        do {
+            if usedManagedVirtualDisplay {
+                promotedExternal = try displayManager.setMainDisplay(
+                    id: replacementDisplayID,
+                    reason: "managed virtual display",
+                    fallbackResolution: resolution
+                )
+            } else {
+                promotedExternal = try displayManager.setMainDisplay(
+                    id: replacementDisplayID,
+                    reason: "external/dummy display"
+                )
+            }
+        } catch {
+            let message = "Unable to set the replacement display as the main display. Normal Mode has been preserved."
+            abortFailedHandoff(message: message, builtInDisplayID: builtInDisplayID, softDisconnected: false)
+            throw NSError(domain: "CodexHeadless.DisplayHandoff", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        guard promotedExternal else {
+            let message = "Unable to set the replacement display as the main display. Normal Mode has been preserved."
+            abortFailedHandoff(message: message, builtInDisplayID: builtInDisplayID, softDisconnected: false)
+            throw NSError(domain: "CodexHeadless.DisplayHandoff", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        stateStore.update { $0.replacementDisplayPromoted = true }
+
         setPhase(.disconnectingBuiltInDisplay)
+        logger.info("[Display] soft-disconnecting built-in display \(builtInDisplayID.map(String.init) ?? "unknown").")
         let softDisconnectResult = builtInDisplayManager.attemptSoftDisconnectIfSafe(
             builtInDisplayID: builtInDisplayID,
             hasAlternativeDisplay: hasExternal || promotedExternal,
@@ -161,6 +253,12 @@ public final class HeadlessController {
                     logger.error("Failed to block soft-disconnect after helper crash: \(error.localizedDescription)")
                 }
             }
+
+            if config.effectiveDisplayHandoff.onSoftDisconnectFailure == .restore {
+                let message = "The built-in display could not be disconnected. Normal Mode has been restored."
+                abortFailedHandoff(message: message, builtInDisplayID: builtInDisplayID, softDisconnected: false)
+                throw NSError(domain: "CodexHeadless.DisplayHandoff", code: 3, userInfo: [NSLocalizedDescriptionKey: message])
+            }
         }
 
         var brightnessDimmed = false
@@ -176,7 +274,23 @@ public final class HeadlessController {
             }
         }
 
+        setPhase(.verifyingDisplayHandoff)
+        let replacementStillUsable = displayManager.displays().contains {
+            $0.id == replacementDisplayID && $0.isActive && ($0.isOnline || $0.isManagedVirtual)
+        }
+            || (usedManagedVirtualDisplay && stateStore.load().virtualDisplayPID != nil)
+        if !replacementStillUsable {
+            let message = "The replacement display became unavailable during handoff. Normal Mode has been restored."
+            abortFailedHandoff(message: message, builtInDisplayID: builtInDisplayID, softDisconnected: softDisconnected)
+            throw NSError(domain: "CodexHeadless.DisplayHandoff", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+
         let headlessReady = promotedExternal && (softDisconnected || brightnessDimmed)
+        if !headlessReady {
+            let message = "The built-in display could not be safely handed off. Normal Mode has been restored."
+            abortFailedHandoff(message: message, builtInDisplayID: builtInDisplayID, softDisconnected: softDisconnected)
+            throw NSError(domain: "CodexHeadless.DisplayHandoff", code: 5, userInfo: [NSLocalizedDescriptionKey: message])
+        }
         let touchBarResult: TouchBarChangeResult
         if headlessReady {
             setPhase(.hidingTouchBar)
@@ -212,30 +326,37 @@ public final class HeadlessController {
         if !softDisconnected && !brightnessDimmed {
             state.lastError = "Built-in display is still active; brightness control was unavailable."
         }
+        let confirmation = config.effectiveConfirmation
+        let confirmationRequired = headlessReady
+            && rollbackEnabled
+            && confirmation.policy.requiresConfirmation(usedManagedVirtualDisplay: usedManagedVirtualDisplay)
+        state.confirmationRequired = confirmationRequired
         if headlessReady {
-            state.mode = rollbackEnabled && config.rollback.enabled ? .confirmRequired : .headless
+            state.mode = confirmationRequired ? .confirmRequired : .headless
         } else {
             state.mode = .fallback
         }
-        state.phase = state.mode == .confirmRequired ? .waitingForConfirmation : .idle
+        state.phase = state.mode == .confirmRequired ? .waitingForConfirmation : .headlessActive
         state.phaseMessage = state.phase?.message
         state.phaseStartedAt = Date()
-        state.phaseDeadlineAt = rollbackEnabled && config.rollback.enabled
-            ? Date().addingTimeInterval(TimeInterval(config.rollback.timeoutSeconds))
+        state.phaseDeadlineAt = confirmationRequired
+            ? Date().addingTimeInterval(TimeInterval(confirmation.timeoutSeconds))
             : nil
         state.lastProgressAt = Date()
-        state.rollbackConfirmed = !(rollbackEnabled && config.rollback.enabled)
-        if rollbackEnabled && config.rollback.enabled {
-            state.rollbackDeadline = Date().addingTimeInterval(TimeInterval(config.rollback.timeoutSeconds))
+        state.rollbackConfirmed = !confirmationRequired
+        if confirmationRequired {
+            state.rollbackDeadline = Date().addingTimeInterval(TimeInterval(confirmation.timeoutSeconds))
         } else {
             state.rollbackDeadline = nil
         }
         try stateStore.save(state)
 
-        if rollbackEnabled && config.rollback.enabled {
-            _ = rollbackGuard.begin(timeoutSeconds: config.rollback.timeoutSeconds)
+        if confirmationRequired {
+            _ = rollbackGuard.begin(timeoutSeconds: confirmation.timeoutSeconds)
         }
 
+        logger.info("[Display] handoff completed.")
+        logger.info("[Confirmation] policy=\(confirmation.policy.rawValue), required=\(confirmationRequired).")
         logger.info("Headless Mode entered with mode \(state.mode.rawValue). External promoted: \(promotedExternal).")
     }
 
@@ -358,9 +479,6 @@ public final class HeadlessController {
             Thread.sleep(forTimeInterval: stabilizationSeconds)
         }
 
-        setPhase(.stoppingVirtualDisplay)
-        virtualDisplayManager.destroyVirtualDisplayIfManaged()
-
         setPhase(.restoringTouchBar)
         let touchBarResult = touchBarManager.showIfNeeded(state.touchBarHidden)
         if touchBarResult.success {
@@ -376,6 +494,9 @@ public final class HeadlessController {
         } else {
             logger.warn(restoreResult.message)
         }
+
+        setPhase(.stoppingVirtualDisplay)
+        virtualDisplayManager.destroyVirtualDisplayIfManaged()
 
         setPhase(.stoppingKeepAwake)
         sleepManager.disableKeepAwake()
@@ -441,15 +562,23 @@ public final class HeadlessController {
         }
     }
 
-    public func confirm() {
+    @discardableResult
+    public func confirm() -> Bool {
+        let state = stateStore.load()
+        guard state.mode == .confirmRequired else {
+            logger.info("Confirm ignored: current mode is \(state.mode.rawValue).")
+            return false
+        }
         rollbackGuard.confirm()
         stateStore.update { state in
-            state.phase = .idle
-            state.phaseMessage = RuntimePhase.idle.message
+            state.confirmationRequired = false
+            state.phase = .headlessActive
+            state.phaseMessage = RuntimePhase.headlessActive.message
             state.phaseStartedAt = Date()
             state.phaseDeadlineAt = nil
             state.lastProgressAt = Date()
         }
+        return true
     }
 
     public func rollbackIfNeeded() {
@@ -507,20 +636,6 @@ public final class HeadlessController {
         )
     }
 
-    private func promoteSoftwareVirtualDisplay(id: UInt32, resolution: Resolution) -> Bool {
-        setPhase(.promotingVirtualDisplay)
-        do {
-            return try displayManager.setMainDisplay(
-                id: id,
-                reason: "software virtual display",
-                fallbackResolution: resolution
-            )
-        } catch {
-            logger.warn("Software virtual display promotion failed: \(error.localizedDescription)")
-            return false
-        }
-    }
-
     private func cleanFailedEnable(message: String) {
         virtualDisplayManager.destroyVirtualDisplayIfManaged()
         sleepManager.disableKeepAwake()
@@ -537,6 +652,39 @@ public final class HeadlessController {
             cleanState.phaseDeadlineAt = nil
             cleanState.lastProgressAt = Date()
         }
+        logger.error("[Enable] aborted; Normal Mode preserved.")
+    }
+
+    private func abortFailedHandoff(
+        message: String,
+        builtInDisplayID: UInt32?,
+        softDisconnected: Bool
+    ) {
+        logger.warn("[Safety] restoring Normal Mode after display handoff failure.")
+
+        if softDisconnected {
+            let result = builtInDisplayManager.restoreBuiltInDisplay(displayID: builtInDisplayID)
+            if result.success {
+                logger.info(result.message)
+                if let builtInDisplayID {
+                    _ = displayManager.waitForDisplay(id: builtInDisplayID, present: true, timeoutSeconds: 5)
+                }
+            } else {
+                logger.warn(result.message)
+            }
+        }
+        if let builtInDisplayID,
+           displayManager.display(id: builtInDisplayID) != nil {
+            do {
+                _ = try displayManager.setMainDisplay(id: builtInDisplayID, reason: "built-in display during failed handoff recovery")
+            } catch {
+                logger.warn("Failed to restore built-in display as main after handoff failure: \(error.localizedDescription)")
+            }
+        }
+
+        _ = touchBarManager.showIfNeeded(stateStore.load().touchBarHidden)
+        _ = builtInDisplayManager.restoreBrightness(stateStore.load().originalBrightness)
+        cleanFailedEnable(message: message)
     }
 
     private func setPhase(_ phase: RuntimePhase, timeoutSeconds: Int? = nil) {
@@ -586,6 +734,14 @@ public final class HeadlessController {
         state.touchBarHideMethod = nil
         state.touchBarLastMessage = nil
         state.restoreCooldownUntil = cooldownUntil
+        state.builtInDisplayID = nil
+        state.builtInWasMain = nil
+        state.replacementDisplayID = nil
+        state.replacementDisplayType = nil
+        state.replacementDisplayReady = false
+        state.replacementDisplayPromoted = false
+        state.confirmationRequired = false
+        state.enableCancellationRequested = false
     }
 
     private func isUsableHeadlessState(_ state: RuntimeState) -> Bool {
@@ -604,6 +760,7 @@ public final class HeadlessController {
         let config = configManager.load()
         let state = stateStore.load()
         let virtualDisplayPolicy = VirtualDisplayPolicy.effectivePolicy(for: config.virtualDisplay)
+        let confirmation = config.effectiveConfirmation
         let pidText = state.caffeinatePID.map(String.init) ?? "Not Running"
         let backendText = state.keepAwakeBackend ?? config.keepAwakeBackend?.rawValue ?? KeepAwakeBackend.caffeinate.rawValue
         let deadlineText = state.rollbackDeadline.map { ISO8601DateFormatter().string(from: $0) } ?? "None"
@@ -678,6 +835,20 @@ public final class HeadlessController {
           Resolution: \(config.virtualDisplay.resolution)
           Refresh Rate: \(config.virtualDisplay.refreshRate)Hz
           Scale Mode: \(config.virtualDisplay.scaleMode)
+
+        Display Handoff:
+          Built-in ID: \(state.builtInDisplayID.map(String.init) ?? "Not Active")
+          Built-in Was Main: \(state.builtInWasMain.map { $0 ? "Yes" : "No" } ?? "Unknown")
+          Replacement Type: \(state.replacementDisplayType ?? "Not Active")
+          Replacement ID: \(state.replacementDisplayID.map(String.init) ?? "Not Active")
+          Replacement Ready: \(state.replacementDisplayReady == true ? "Yes" : "No")
+          Replacement Promoted: \(state.replacementDisplayPromoted == true ? "Yes" : "No")
+
+        Confirmation:
+          Policy: \(confirmation.policy.rawValue)
+          Required: \(state.confirmationRequired == true ? "Yes" : "No")
+          Timeout: \(confirmation.timeoutSeconds)s
+          Dialog: \(confirmation.dialogEnabled ? "On" : "Off")
 
         Main Display: \(mainText)
         Built-in Brightness: \(brightnessText)

@@ -15,15 +15,21 @@ public enum RuntimePhase: String, Codable {
     case startingKeepAwake
     case checkingDisplays
     case usingExternalDisplay
+    case preparingExternalDisplay
     case creatingVirtualDisplay
     case waitingForVirtualDisplayEnumeration
     case acceptingReportedVirtualDisplayID
+    case validatingVirtualDisplay
+    case replacementDisplayReady
+    case committingDisplayHandoff
     case promotingVirtualDisplay
     case promotingExternalDisplay
     case disconnectingBuiltInDisplay
     case waitingForBuiltInDisplayDisconnect
+    case verifyingDisplayHandoff
     case hidingTouchBar
     case waitingForConfirmation
+    case headlessActive
     case rollbackExpired
     case restoringBuiltInDisplay
     case waitingForPhysicalDisplay
@@ -43,15 +49,21 @@ public enum RuntimePhase: String, Codable {
         case .startingKeepAwake: "Starting Keep Awake..."
         case .checkingDisplays: "Checking displays..."
         case .usingExternalDisplay: "Using external display as main display..."
+        case .preparingExternalDisplay: "Preparing external display..."
         case .creatingVirtualDisplay: "Creating virtual display..."
         case .waitingForVirtualDisplayEnumeration: "Waiting for macOS to detect the virtual display..."
         case .acceptingReportedVirtualDisplayID: "Using the reported virtual display ID..."
+        case .validatingVirtualDisplay: "Validating virtual display..."
+        case .replacementDisplayReady: "Replacement display is ready."
+        case .committingDisplayHandoff: "Switching to replacement display..."
         case .promotingVirtualDisplay: "Setting virtual display as main display..."
         case .promotingExternalDisplay: "Setting external display as main display..."
         case .disconnectingBuiltInDisplay: "Disconnecting built-in display..."
         case .waitingForBuiltInDisplayDisconnect: "Checking built-in display state..."
+        case .verifyingDisplayHandoff: "Verifying display handoff..."
         case .hidingTouchBar: "Hiding Touch Bar UI..."
         case .waitingForConfirmation: "Waiting for confirmation..."
+        case .headlessActive: "Headless Mode is active."
         case .rollbackExpired: "Rollback deadline expired. Restoring Normal Mode..."
         case .restoringBuiltInDisplay: "Restoring built-in display..."
         case .waitingForPhysicalDisplay: "Waiting for a physical display to become available..."
@@ -257,6 +269,65 @@ public struct ConfirmDialogConfig: Codable {
     )
 }
 
+public enum ConfirmationPolicy: String, Codable, CaseIterable {
+    case always
+    case softwareVirtualDisplayOnly = "software-virtual-display-only"
+    case never
+
+    public static func parse(_ rawValue: String) throws -> ConfirmationPolicy {
+        guard let policy = ConfirmationPolicy(rawValue: rawValue.lowercased()) else {
+            throw NSError(domain: "CodexHeadless.ConfirmationPolicy", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid confirmation policy: use always, software-virtual-display-only, or never."
+            ])
+        }
+        return policy
+    }
+
+    public func requiresConfirmation(usedManagedVirtualDisplay: Bool) -> Bool {
+        switch self {
+        case .always: return true
+        case .softwareVirtualDisplayOnly: return usedManagedVirtualDisplay
+        case .never: return false
+        }
+    }
+}
+
+public struct ConfirmationConfig: Codable {
+    public var policy: ConfirmationPolicy
+    public var timeoutSeconds: Int
+    public var dialogEnabled: Bool
+
+    public static let `default` = ConfirmationConfig(
+        policy: .softwareVirtualDisplayOnly,
+        timeoutSeconds: 30,
+        dialogEnabled: true
+    )
+}
+
+public enum SoftDisconnectFailureBehavior: String, Codable, CaseIterable {
+    case restore
+    case brightnessFallback = "brightness-fallback"
+
+    public static func parse(_ rawValue: String) throws -> SoftDisconnectFailureBehavior {
+        guard let behavior = SoftDisconnectFailureBehavior(rawValue: rawValue.lowercased()) else {
+            throw NSError(domain: "CodexHeadless.DisplayHandoff", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid soft-disconnect failure behavior: use restore or brightness-fallback."
+            ])
+        }
+        return behavior
+    }
+}
+
+public struct DisplayHandoffConfig: Codable {
+    public var keepBuiltInMainDuringPreparation: Bool
+    public var onSoftDisconnectFailure: SoftDisconnectFailureBehavior
+
+    public static let `default` = DisplayHandoffConfig(
+        keepBuiltInMainDuringPreparation: true,
+        onSoftDisconnectFailure: .restore
+    )
+}
+
 public struct TimingConfig: Codable {
     public static let supportedKeys: Set<String> = [
         "virtualDisplayEnumerationWaitSeconds",
@@ -318,6 +389,8 @@ public struct AppConfig: Codable {
     public var hideTouchBarInHeadless: Bool?
     public var hotkeys: HotkeysConfig?
     public var confirmDialog: ConfirmDialogConfig?
+    public var confirmation: ConfirmationConfig?
+    public var displayHandoff: DisplayHandoffConfig?
     public var timing: TimingConfig?
 
     public var effectiveHotkeys: HotkeysConfig {
@@ -325,7 +398,30 @@ public struct AppConfig: Codable {
     }
 
     public var effectiveConfirmDialog: ConfirmDialogConfig {
-        confirmDialog ?? .default
+        let legacy = confirmDialog ?? .default
+        let confirmation = effectiveConfirmation
+        return ConfirmDialogConfig(
+            enabled: confirmation.dialogEnabled,
+            timeoutSeconds: confirmation.timeoutSeconds,
+            showHotkeyHints: legacy.showHotkeyHints,
+            showCountdown: legacy.showCountdown
+        )
+    }
+
+    public var effectiveConfirmation: ConfirmationConfig {
+        if let confirmation {
+            return confirmation
+        }
+        let legacy = confirmDialog ?? .default
+        return ConfirmationConfig(
+            policy: .softwareVirtualDisplayOnly,
+            timeoutSeconds: legacy.timeoutSeconds,
+            dialogEnabled: legacy.enabled
+        )
+    }
+
+    public var effectiveDisplayHandoff: DisplayHandoffConfig {
+        displayHandoff ?? .default
     }
 
     public var effectiveTiming: TimingConfig {
@@ -342,6 +438,8 @@ public struct AppConfig: Codable {
         hideTouchBarInHeadless: true,
         hotkeys: .default,
         confirmDialog: .default,
+        confirmation: .default,
+        displayHandoff: .default,
         timing: .default
     )
 }
@@ -378,6 +476,14 @@ public struct RuntimeState: Codable {
     public var phaseStartedAt: Date?
     public var phaseDeadlineAt: Date?
     public var lastProgressAt: Date?
+    public var builtInDisplayID: UInt32?
+    public var builtInWasMain: Bool?
+    public var replacementDisplayID: UInt32?
+    public var replacementDisplayType: String?
+    public var replacementDisplayReady: Bool?
+    public var replacementDisplayPromoted: Bool?
+    public var confirmationRequired: Bool?
+    public var enableCancellationRequested: Bool?
 
     public static let `default` = RuntimeState(
         mode: .normal,
@@ -410,7 +516,15 @@ public struct RuntimeState: Codable {
         phaseMessage: RuntimePhase.idle.message,
         phaseStartedAt: nil,
         phaseDeadlineAt: nil,
-        lastProgressAt: nil
+        lastProgressAt: nil,
+        builtInDisplayID: nil,
+        builtInWasMain: nil,
+        replacementDisplayID: nil,
+        replacementDisplayType: nil,
+        replacementDisplayReady: false,
+        replacementDisplayPromoted: false,
+        confirmationRequired: false,
+        enableCancellationRequested: false
     )
 }
 

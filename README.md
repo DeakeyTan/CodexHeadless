@@ -29,10 +29,11 @@ CodexHeadless is a macOS menu bar utility and CLI for using a MacBook as a remot
 - Keep Awake：进入 Headless Mode 时启动，恢复 Normal Mode 时停止。
 - 外接屏/Dummy 优先：有外接显示器或 HDMI Dummy 时优先保持它为主显示器。
 - 软件虚拟显示器：可按策略创建 `CGVirtualDisplay` 虚拟显示器。
-- 内建屏处理：有替代显示器时可 soft-disconnect 内建屏；失败时回退到亮度降低。
+- 安全显示交接：先准备并验证替代显示器，再连续执行主屏切换和内建屏 soft-disconnect。
+- 内建屏处理：默认在 soft-disconnect 失败时恢复 Normal Mode；高级用户可选择亮度降级。
 - 显示布局备份：进入 Headless Mode 前按物理屏组合保存布局，恢复时尽量回放原来的排列。
 - Touch Bar 隐藏：可清空 Control Strip UI，让 OLED 区域黑屏。
-- 回滚保护：默认 30 秒确认窗口，未确认会自动恢复。
+- Confirmation Policy：软件虚拟屏路径默认需要 30 秒内确认，外接/Dummy 路径默认直接进入 Headless Mode。
 - 日志：关键显示器、睡眠、恢复步骤都会写入日志。
 
 English:
@@ -42,10 +43,11 @@ English:
 - Keep Awake: starts with Headless Mode and stops when Normal Mode is restored.
 - External/dummy display priority: keeps an external display or HDMI dummy plug as the main display when available.
 - Software virtual display: can create a `CGVirtualDisplay` based on policy.
-- Built-in display handling: soft-disconnects the built-in display when a safe alternative exists; falls back to brightness dimming.
+- Safe display handoff: prepares and verifies a replacement before promoting it and soft-disconnecting the built-in display.
+- Built-in display handling: restores Normal Mode by default if soft-disconnect fails; advanced users may opt into brightness fallback.
 - Display layout backup: saves the physical display arrangement before Headless Mode and restores it when returning to Normal Mode.
 - Touch Bar hiding: clears the Control Strip UI so the OLED area is black.
-- Rollback guard: default 30-second confirmation window; restores automatically if not confirmed.
+- Confirmation policy: the managed virtual display path requires confirmation by default; external/dummy paths enter Headless Mode directly.
 - Logging: records key display, sleep, and restore operations.
 
 ## 安装 / Installation
@@ -94,8 +96,8 @@ codex-headless off
 
 1. 打开 `/Applications/CodexHeadless.app`。
 2. 点击菜单栏 `CH` → `Enable Headless Mode`，或按 `⌃⌥⌘⇧E`。
-3. 确认远程显示、SSH、Touch Bar 和内建屏状态正常。
-4. 点击 `Confirm`，或按 `⌃⌥⌘⇧C`。
+3. 如果状态变为 `CH: Wait`，确认远程显示、SSH、Touch Bar 和内建屏状态正常。
+4. 点击 `Confirm`，或按 `⌃⌥⌘⇧C`。外接/Dummy 路径按默认策略不需要确认。
 5. 需要恢复时点击 `Restore Normal Mode`，或按 `⌃⌥⌘⇧R`。
 
 CLI 等价流程：
@@ -111,8 +113,8 @@ English:
 
 1. Open `/Applications/CodexHeadless.app`.
 2. Click `CH` → `Enable Headless Mode`, or press `⌃⌥⌘⇧E`.
-3. Confirm that remote display, SSH, Touch Bar, and built-in display state look correct.
-4. Click `Confirm`, or press `⌃⌥⌘⇧C`.
+3. If the status becomes `CH: Wait`, verify remote display, SSH, Touch Bar, and built-in display state.
+4. Click `Confirm`, or press `⌃⌥⌘⇧C`. External/dummy paths do not require confirmation under the default policy.
 5. To restore, click `Restore Normal Mode`, or press `⌃⌥⌘⇧R`.
 
 Equivalent CLI flow:
@@ -143,7 +145,7 @@ codex-headless off
 
 | 菜单项 / Menu Item | 中文说明 | English |
 | --- | --- | --- |
-| `Enable Headless Mode` | 启动 Keep Awake，准备替代显示器，处理内建屏和 Touch Bar，然后进入确认窗口。 | Starts Keep Awake, prepares an alternative display, handles built-in display and Touch Bar, then enters confirmation. |
+| `Enable Headless Mode` | 启动 Keep Awake，安全交接替代显示器并处理内建屏和 Touch Bar；是否确认由策略决定。 | Starts Keep Awake, safely hands off to a replacement display, and handles built-in display and Touch Bar; confirmation depends on policy. |
 | `Confirm Headless Mode` | 确认当前显示状态正常，取消自动回滚。 | Confirms the current display state and cancels rollback. |
 | `Rollback Now` | 在确认窗口内立即恢复 Normal Mode。 | Restores Normal Mode immediately during the confirmation window. |
 | `Restore Normal Mode` | 恢复内建屏和 Touch Bar，关闭本工具创建的虚拟显示器，停止 Keep Awake。 | Restores built-in display and Touch Bar, closes managed virtual display, and stops Keep Awake. |
@@ -158,7 +160,7 @@ codex-headless off
 | `Display & Touch Bar Safety` | 控制内建屏 soft-disconnect 和 Touch Bar hide。 | Controls built-in display soft-disconnect and Touch Bar hiding. |
 | `Keep Awake Backend` | 选择 `caffeinate` 或 App 内 native assertion。 | Chooses `caffeinate` or in-app native assertion. |
 | `Hotkeys` | 开关全局快捷键并显示注册状态。 | Enables/disables global hotkeys and shows registration status. |
-| `Confirm Dialog` | 开关确认弹窗及提示显示。 | Enables/disables confirmation dialog and hints. |
+| `Confirmation` | 设置确认策略、超时和确认弹窗。 | Configures confirmation policy, timeout, and dialog. |
 | `Timing` | 调整显示器等待、恢复、冷却等时间参数。 | Tunes display wait, restore, and cooldown timings. |
 | `Diagnostics` | 复制状态、Doctor、自测报告，打开日志和配置目录。 | Copies status, Doctor, self-test reports, and opens log/config folders. |
 
@@ -182,7 +184,7 @@ codex-headless self-test
 中文：
 
 - `status`：查看当前模式、显示器、虚拟显示器、Touch Bar、回滚状态和配置。
-- `on`：进入 Headless Mode，并启动确认窗口。
+- `on`：进入 Headless Mode；是否启动确认窗口由 Confirmation Policy 决定。
 - `confirm`：确认 Headless Mode。
 - `off`：恢复 Normal Mode。
 - `log --tail N`：查看最近 N 行日志。
@@ -195,7 +197,7 @@ codex-headless self-test
 English:
 
 - `status`: shows mode, displays, virtual display, Touch Bar, rollback state, and config.
-- `on`: enters Headless Mode and starts the confirmation window.
+- `on`: enters Headless Mode; Confirmation Policy decides whether a confirmation window is required.
 - `confirm`: confirms Headless Mode.
 - `off`: restores Normal Mode.
 - `log --tail N`: prints the latest N log lines.
@@ -224,6 +226,11 @@ codex-headless config get hotkeys
 codex-headless config set hotkeys.enabled true
 codex-headless config get confirm-dialog
 codex-headless config set confirm-dialog.enabled true
+codex-headless config get confirmation.policy
+codex-headless config set confirmation.policy software-virtual-display-only
+codex-headless config set confirmation.timeout-seconds 30
+codex-headless config get display-handoff
+codex-headless config set display-handoff.on-soft-disconnect-failure restore
 codex-headless config get timing
 codex-headless config set timing.restorePhysicalDisplayGraceSeconds 5
 codex-headless config reset defaults
@@ -277,9 +284,23 @@ codex-headless layout import ~/Desktop/codex-layout.json
 | `soft-disconnect` | `on` | 有替代显示器时尝试 soft-disconnect 内建屏。 | Attempts built-in display soft-disconnect when an alternative display exists. |
 | `touchbar-hide` | `on` | Headless Mode 中清空 Touch Bar Control Strip UI。 | Clears the Touch Bar Control Strip UI in Headless Mode. |
 | `keep-awake-backend` | `caffeinate` | 使用 macOS 自带 `caffeinate` 保持唤醒。 | Uses macOS built-in `caffeinate` to keep the system awake. |
-| `rollback` | `on, 30s` | `on` 后必须确认，否则自动恢复。 | Requires confirmation after `on`; otherwise auto-restores. |
+| `confirmation.policy` | `software-virtual-display-only` | 仅使用 managed virtual display 时要求确认。 | Requires confirmation only when the managed virtual display is used. |
+| `confirmation.timeoutSeconds` | `30` | 需要确认时的自动回滚倒计时。 | Auto-rollback countdown when confirmation is required. |
 | `hotkeys.enabled` | `true` | 开启全局快捷键。 | Enables global hotkeys. |
 | `confirm-dialog.enabled` | `true` | 菜单栏 App 中显示确认/回滚弹窗。 | Shows Confirm/Rollback dialog in the menu bar app. |
+| `display-handoff.on-soft-disconnect-failure` | `restore` | soft-disconnect 失败时恢复 Normal Mode。 | Restores Normal Mode when soft-disconnect fails. |
+
+### Confirmation Policy
+
+| 值 / Value | 中文说明 | English |
+| --- | --- | --- |
+| `always` | 所有显示路径都要求确认。 | Requires confirmation for every display path. |
+| `software-virtual-display-only` | 只有实际使用本工具创建的软件虚拟屏时要求确认。 | Requires confirmation only when the managed virtual display is used. |
+| `never` | 所有路径直接进入 Headless；仍可随时使用 Restore。 | Enters Headless directly for all paths; Restore remains available. |
+
+Prepare 阶段始终保留当前安全物理输出；只有替代显示器已验证可用后才执行 Commit。Restore 则先恢复并提升物理显示器，最后停止 managed virtual display。
+
+Prepare always keeps a safe physical output available. Commit starts only after the replacement display is verified. Restore brings back and promotes a physical display before stopping the managed virtual display.
 
 ### Virtual Display Policy
 
