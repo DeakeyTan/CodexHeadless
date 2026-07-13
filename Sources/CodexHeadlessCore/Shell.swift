@@ -7,9 +7,11 @@ public struct ShellResult {
     public var terminationReason: Process.TerminationReason
     public var output: String
     public var errorOutput: String
+    public var timedOut: Bool
+    public var durationMilliseconds: Int
 
     public var succeeded: Bool {
-        terminationReason == .exit && exitCode == 0
+        !timedOut && terminationReason == .exit && exitCode == 0
     }
 
     public var terminationDescription: String {
@@ -45,15 +47,20 @@ public enum Shell {
         process.standardError = errorPipe
 
         let finished = DispatchSemaphore(value: 0)
-        var didFinish = false
         process.terminationHandler = { _ in
-            didFinish = true
             finished.signal()
         }
 
+        let started = DispatchTime.now().uptimeNanoseconds
         try process.run()
+        let outputReader = ShellPipeReader(handle: outputPipe.fileHandleForReading)
+        let errorReader = ShellPipeReader(handle: errorPipe.fileHandleForReading)
+        outputReader.start()
+        errorReader.start()
+        var timedOut = false
         if let timeoutSeconds {
             if finished.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+                timedOut = true
                 process.terminate()
                 if finished.wait(timeout: .now() + 0.2) == .timedOut {
                     kill(process.processIdentifier, SIGKILL)
@@ -61,27 +68,50 @@ public enum Shell {
                 }
             }
         } else {
-            process.waitUntilExit()
-            didFinish = true
+            _ = finished.wait(timeout: .distantFuture)
         }
 
-        guard didFinish || !process.isRunning else {
-            return ShellResult(
-                exitCode: SIGKILL,
-                terminationReason: .uncaughtSignal,
-                output: "",
-                errorOutput: "Process timed out and did not exit after SIGKILL."
-            )
-        }
-
-        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let errorOutput = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        outputReader.finish(timeoutSeconds: 1)
+        errorReader.finish(timeoutSeconds: 1)
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        let durationMilliseconds = Int(elapsed / 1_000_000)
 
         return ShellResult(
-            exitCode: process.terminationStatus,
-            terminationReason: process.terminationReason,
-            output: output,
-            errorOutput: errorOutput
+            exitCode: process.isRunning ? SIGKILL : process.terminationStatus,
+            terminationReason: process.isRunning ? .uncaughtSignal : process.terminationReason,
+            output: outputReader.text,
+            errorOutput: process.isRunning
+                ? errorReader.text + "Process timed out and did not exit after SIGKILL."
+                : errorReader.text,
+            timedOut: timedOut || process.isRunning,
+            durationMilliseconds: durationMilliseconds
         )
+    }
+}
+
+private final class ShellPipeReader {
+    private let handle: FileHandle
+    private let queue = DispatchQueue(label: "CodexHeadless.shell-pipe-reader")
+    private let finished = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var data = Data()
+
+    init(handle: FileHandle) { self.handle = handle }
+
+    func start() {
+        queue.async { [self] in
+            let value = handle.readDataToEndOfFile()
+            lock.lock(); data = value; lock.unlock()
+            finished.signal()
+        }
+    }
+
+    func finish(timeoutSeconds: TimeInterval) {
+        _ = finished.wait(timeout: .now() + timeoutSeconds)
+    }
+
+    var text: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }

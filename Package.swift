@@ -31,6 +31,15 @@ let package = Package(
         .executableTarget(
             name: "CodexHeadlessCLI",
             dependencies: ["CodexHeadlessCore"]
+        ),
+        .executableTarget(
+            name: "CodexHeadlessTestHelper",
+            dependencies: ["CodexHeadlessCore"],
+            path: "Tests/CodexHeadlessTestHelper"
+        ),
+        .testTarget(
+            name: "CodexHeadlessCoreTests",
+            dependencies: ["CodexHeadlessCore", "CodexHeadlessTestHelper"]
         )
     ]
 )

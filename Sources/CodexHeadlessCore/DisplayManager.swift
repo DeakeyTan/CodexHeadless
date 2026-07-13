@@ -26,11 +26,31 @@ public struct DisplayInfo: Codable {
     }
 }
 
+public struct DisplayTakeoverVerification: Equatable {
+    public var displayID: UInt32
+    public var exists: Bool
+    public var physical: Bool
+    public var active: Bool
+    public var online: Bool
+    public var main: Bool
+    public var stable: Bool
+
+    public var safeToDestroyVirtualDisplay: Bool {
+        exists && physical && active && online && main && stable
+    }
+
+    public var summary: String {
+        "displayID=\(displayID), exists=\(exists), physical=\(physical), active=\(active), online=\(online), main=\(main), stable=\(stable), safe=\(safeToDestroyVirtualDisplay)"
+    }
+}
+
 public final class DisplayManager {
     private let logger: CHLogger
+    private let clock: WorkflowClock
 
-    public init(logger: CHLogger = CHLogger()) {
+    public init(logger: CHLogger = CHLogger(), clock: WorkflowClock = SystemWorkflowClock()) {
         self.logger = logger
+        self.clock = clock
     }
 
     public func displays() -> [DisplayInfo] {
@@ -128,13 +148,13 @@ public final class DisplayManager {
 
     @discardableResult
     public func waitForDisplay(id: UInt32, present expectedPresent: Bool, timeoutSeconds: TimeInterval = 2) -> Bool {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
+        let deadline = clock.uptime + timeoutSeconds
+        while clock.uptime < deadline {
             let present = displays().contains { $0.id == id }
             if present == expectedPresent {
                 return true
             }
-            Thread.sleep(forTimeInterval: 0.15)
+            clock.sleep(seconds: 0.15)
         }
 
         let present = displays().contains { $0.id == id }
@@ -179,14 +199,41 @@ public final class DisplayManager {
         managedVirtualDisplayID: UInt32?,
         timeoutSeconds: TimeInterval
     ) -> DisplayInfo? {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
+        let deadline = clock.uptime + timeoutSeconds
+        while clock.uptime < deadline {
             if let display = restorePriorityDisplay(managedVirtualDisplayID: managedVirtualDisplayID) {
                 return display
             }
-            Thread.sleep(forTimeInterval: 0.2)
+            clock.sleep(seconds: 0.2)
         }
         return restorePriorityDisplay(managedVirtualDisplayID: managedVirtualDisplayID)
+    }
+
+    public func verifyPhysicalTakeover(
+        displayID: UInt32,
+        managedVirtualDisplayID: UInt32?,
+        stabilizationSeconds: TimeInterval
+    ) -> DisplayTakeoverVerification {
+        let initial = displays().first { $0.id == displayID }
+        if stabilizationSeconds > 0 {
+            clock.sleep(seconds: stabilizationSeconds)
+        }
+        let final = displays().first { $0.id == displayID }
+        let isPhysical: (DisplayInfo?) -> Bool = { display in
+            guard let display else { return false }
+            return display.id != managedVirtualDisplayID && !display.isManagedVirtual
+        }
+        let verification = DisplayTakeoverVerification(
+            displayID: displayID,
+            exists: final != nil,
+            physical: isPhysical(final),
+            active: final?.isActive == true,
+            online: final?.isOnline == true,
+            main: final?.isMain == true,
+            stable: initial != nil && final != nil && isPhysical(initial)
+        )
+        logger.info("[Safety] physical takeover verification: \(verification.summary)")
+        return verification
     }
 
     public func setMainDisplay(
@@ -204,9 +251,7 @@ public final class DisplayManager {
         var config: CGDisplayConfigRef?
         let beginError = CGBeginDisplayConfiguration(&config)
         guard beginError == .success, let config else {
-            throw NSError(domain: "CodexHeadless.Display", code: Int(beginError.rawValue), userInfo: [
-                NSLocalizedDescriptionKey: "Failed to begin display configuration."
-            ])
+            throw CodexHeadlessError.displayOperation(message: "Failed to begin display configuration: \(beginError.rawValue).")
         }
 
         var currentDisplays = displays()
@@ -223,9 +268,7 @@ public final class DisplayManager {
 
         let completeError = CGCompleteDisplayConfiguration(config, .permanently)
         guard completeError == .success else {
-            throw NSError(domain: "CodexHeadless.Display", code: Int(completeError.rawValue), userInfo: [
-                NSLocalizedDescriptionKey: "Failed to complete display configuration."
-            ])
+            throw CodexHeadlessError.displayOperation(message: "Failed to complete display configuration: \(completeError.rawValue).")
         }
 
         logger.info("Set \(reason) as main display: \(target.id)")
@@ -258,9 +301,7 @@ public final class DisplayManager {
         var config: CGDisplayConfigRef?
         let beginError = CGBeginDisplayConfiguration(&config)
         guard beginError == .success, let config else {
-            throw NSError(domain: "CodexHeadless.DisplayLayout", code: Int(beginError.rawValue), userInfo: [
-                NSLocalizedDescriptionKey: "Failed to begin display layout restoration."
-            ])
+            throw CodexHeadlessError.displayLayout(message: "Failed to begin display layout restoration: \(beginError.rawValue).")
         }
 
         for match in matches {
@@ -281,14 +322,12 @@ public final class DisplayManager {
 
         let completeError = CGCompleteDisplayConfiguration(config, .permanently)
         guard completeError == .success else {
-            throw NSError(domain: "CodexHeadless.DisplayLayout", code: Int(completeError.rawValue), userInfo: [
-                NSLocalizedDescriptionKey: "Failed to complete display layout restoration."
-            ])
+            throw CodexHeadlessError.displayLayout(message: "Failed to complete display layout restoration: \(completeError.rawValue).")
         }
 
         let skippedCount = max(0, physicalSnapshotEntries.count - matches.count)
         let message = "Restored display layout from snapshot: applied=\(matches.count), skipped=\(skippedCount)"
-        logger.info(message)
+        logger.info("[Display] layout configuration committed applied=\(matches.count) skipped=\(skippedCount)")
         return DisplayLayoutRestoreResult(
             appliedCount: matches.count,
             skippedCount: skippedCount,

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-architectures:
+    name: Build Architectures (${{ matrix.arch }})
+    runs-on: macos-15
+    strategy:
+      matrix:
+        arch: [arm64, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Environment
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          swift --version
+          uname -m
+          sw_vers
+      - name: Build ${{ matrix.arch }}
+        run: swift build --arch "${{ matrix.arch }}"
+
+  xctest-gate:
+    name: XCTest Gate
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: XCTest with nonzero execution gate
+        env:
+          CODEX_HEADLESS_TEST_SCRATCH_PATH: /private/tmp/CodexHeadless-ci-tests
+          CODEX_HEADLESS_XCTEST_LOG: /private/tmp/CodexHeadless-ci-tests/xctest.log
+        run: bash scripts/run_xctest_gate.sh
+      - name: Upload XCTest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xctest-log
+          path: /private/tmp/CodexHeadless-ci-tests/xctest.log
+          if-no-files-found: error
+
+  safety-audits:
+    name: Safety Audits
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell and YAML
+        run: |
+          bash -n scripts/*.sh scripts/tests/*.sh
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each { |path| YAML.load_file(path) }'
+      - name: Run safety audits
+        run: |
+          bash scripts/audit_critical_reads.sh
+          bash scripts/audit_app_responsiveness.sh
+          bash scripts/audit_r6_helper_protocol.sh
+          bash scripts/audit_r7_uat_safety.sh
+          bash scripts/audit_r7_1_code_gate.sh
+          bash scripts/audit_r7_2_code_gate.sh
+          bash scripts/audit_r7_2_1_final_patch.sh
+          bash scripts/tests/test_uninstall_safety.sh
+          bash scripts/tests/test_uninstall_atomicity.sh
+          bash scripts/tests/test_xctest_gate_parser.sh

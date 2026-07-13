@@ -3,77 +3,87 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/version.sh"
 
-VERSION="${CODEX_HEADLESS_VERSION:-0.5}"
-ARCH="${CODEX_HEADLESS_ARCH:-arm64}"
+VERSION="$(codex_headless_version)"
+ARCH="${CODEX_HEADLESS_ARCH:-universal}"
 export COPYFILE_DISABLE=1
 export MACOSX_DEPLOYMENT_TARGET="${CODEX_HEADLESS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-13.0}}"
 if [[ -n "${CODEX_HEADLESS_SDKROOT:-}" ]]; then
   export SDKROOT="$CODEX_HEADLESS_SDKROOT"
 fi
 
+case "$ARCH" in
+  arm64|x86_64|universal) ;;
+  *) echo "Unsupported architecture: $ARCH (use arm64, x86_64, or universal)" >&2; exit 1 ;;
+esac
+
 echo "Building CodexHeadless package..."
 echo "Version: $VERSION"
 echo "Architecture: $ARCH"
 echo "Deployment target: $MACOSX_DEPLOYMENT_TARGET"
-if [[ -n "${SDKROOT:-}" ]]; then
-  echo "SDKROOT: $SDKROOT"
+
+build_arch() {
+  local target_arch="$1"
+  local scratch="$ROOT_DIR/.build/release-$target_arch"
+  local build_args=(build -c release --arch "$target_arch" --scratch-path "$scratch")
+  if [[ -n "${CODEX_HEADLESS_BUILD_SYSTEM:-}" ]]; then
+    build_args+=(--build-system "$CODEX_HEADLESS_BUILD_SYSTEM")
+  fi
+  swift "${build_args[@]}"
+  local binary_dir="$scratch/$target_arch-apple-macosx/release"
+  if [[ ! -x "$binary_dir/CodexHeadless" ]]; then
+    binary_dir="$scratch/release"
+  fi
+  [[ -x "$binary_dir/CodexHeadless" ]] || { echo "Missing $target_arch App executable" >&2; exit 1; }
+  [[ -x "$binary_dir/codex-headless" ]] || { echo "Missing $target_arch CLI executable" >&2; exit 1; }
+  printf '%s\n' "$binary_dir"
+}
+
+ASSEMBLY_DIR="$ROOT_DIR/.build/dist/$ARCH/release"
+rm -rf "$ASSEMBLY_DIR"
+mkdir -p "$ASSEMBLY_DIR"
+
+if [[ "$ARCH" == "universal" ]]; then
+  ARM_DIR="$(build_arch arm64 | tail -n 1)"
+  INTEL_DIR="$(build_arch x86_64 | tail -n 1)"
+  lipo -create "$ARM_DIR/CodexHeadless" "$INTEL_DIR/CodexHeadless" -output "$ASSEMBLY_DIR/CodexHeadless"
+  lipo -create "$ARM_DIR/codex-headless" "$INTEL_DIR/codex-headless" -output "$ASSEMBLY_DIR/codex-headless"
+  chmod 0755 "$ASSEMBLY_DIR/CodexHeadless" "$ASSEMBLY_DIR/codex-headless"
 else
-  echo "SDKROOT: system default"
+  SOURCE_DIR="$(build_arch "$ARCH" | tail -n 1)"
+  install -m 0755 "$SOURCE_DIR/CodexHeadless" "$ASSEMBLY_DIR/CodexHeadless"
+  install -m 0755 "$SOURCE_DIR/codex-headless" "$ASSEMBLY_DIR/codex-headless"
 fi
+printf '%s\n' "$VERSION" > "$ASSEMBLY_DIR/version.txt"
 
-swift build -c release --arch "$ARCH" --build-system native
+EXPECTED_ARCHS="$ARCH"
+if [[ "$ARCH" == "universal" ]]; then EXPECTED_ARCHS="arm64 x86_64"; fi
+for binary in "$ASSEMBLY_DIR/CodexHeadless" "$ASSEMBLY_DIR/codex-headless"; do
+  actual="$(lipo -archs "$binary")"
+  for expected in $EXPECTED_ARCHS; do
+    [[ " $actual " == *" $expected "* ]] || { echo "$binary is missing $expected: $actual" >&2; exit 1; }
+  done
+done
 
-RELEASE_DIR="$ROOT_DIR/.build/${ARCH}-apple-macosx/release"
-if [[ ! -x "$RELEASE_DIR/CodexHeadless" || ! -x "$RELEASE_DIR/codex-headless" ]]; then
-  RELEASE_DIR="$ROOT_DIR/.build/release"
-fi
-
-APP_EXECUTABLE="$RELEASE_DIR/CodexHeadless"
-CLI_EXECUTABLE="$RELEASE_DIR/codex-headless"
-if [[ ! -x "$APP_EXECUTABLE" ]]; then
-  echo "Missing app executable: $APP_EXECUTABLE" >&2
-  exit 1
-fi
-if [[ ! -x "$CLI_EXECUTABLE" ]]; then
-  echo "Missing CLI executable: $CLI_EXECUTABLE" >&2
-  exit 1
-fi
-
-if command -v lipo >/dev/null 2>&1; then
-  if ! lipo -archs "$APP_EXECUTABLE" | tr ' ' '\n' | grep -qx "$ARCH"; then
-    echo "App executable does not contain requested architecture: $ARCH" >&2
-    lipo -archs "$APP_EXECUTABLE" >&2
-    exit 1
-  fi
-  if ! lipo -archs "$CLI_EXECUTABLE" | tr ' ' '\n' | grep -qx "$ARCH"; then
-    echo "CLI executable does not contain requested architecture: $ARCH" >&2
-    lipo -archs "$CLI_EXECUTABLE" >&2
-    exit 1
-  fi
-fi
-
-PKG_WORK_DIR="${CODEX_HEADLESS_PKG_WORK_DIR:-/private/tmp/CodexHeadless-pkg}"
-PKG_ROOT="$PKG_WORK_DIR/root"
-PKG_OUTPUT_DIR="$ROOT_DIR/.build/pkg"
-PKG_OUTPUT="$PKG_OUTPUT_DIR/CodexHeadless-$VERSION-$ARCH-unsigned.pkg"
-
-rm -rf "$PKG_ROOT"
-mkdir -p "$PKG_OUTPUT_DIR"
-mkdir -p "$PKG_ROOT/Applications"
-mkdir -p "$PKG_ROOT/usr/local/bin"
-
-CODEX_HEADLESS_RELEASE_DIR="$RELEASE_DIR" \
-CODEX_HEADLESS_APP_BUNDLE_PATH="$PKG_ROOT/Applications/CodexHeadless.app" \
+APP_BUNDLE="$ROOT_DIR/.build/dist/$ARCH/CodexHeadless.app"
+CODEX_HEADLESS_RELEASE_DIR="$ASSEMBLY_DIR" \
+CODEX_HEADLESS_APP_BUNDLE_PATH="$APP_BUNDLE" \
 CODEX_HEADLESS_VERSION="$VERSION" \
 bash "$ROOT_DIR/scripts/build_app_bundle.sh"
 
-install -m 0755 "$CLI_EXECUTABLE" "$PKG_ROOT/usr/local/bin/codex-headless"
+PKG_WORK_DIR="${CODEX_HEADLESS_PKG_WORK_DIR:-/private/tmp/CodexHeadless-pkg-$ARCH}"
+PKG_ROOT="$PKG_WORK_DIR/root"
+PKG_OUTPUT_DIR="$ROOT_DIR/.build/pkg"
+PKG_OUTPUT="$PKG_OUTPUT_DIR/CodexHeadless-$VERSION-$ARCH-unsigned.pkg"
+PKG_TEMP_OUTPUT="$PKG_WORK_DIR/CodexHeadless-$VERSION-$ARCH-unsigned.pkg"
+rm -rf "$PKG_ROOT"
+rm -f "$PKG_TEMP_OUTPUT"
+mkdir -p "$PKG_ROOT/Applications" "$PKG_ROOT/usr/local/bin" "$PKG_OUTPUT_DIR"
+COPYFILE_DISABLE=1 /bin/cp -R "$APP_BUNDLE" "$PKG_ROOT/Applications/CodexHeadless.app"
+install -m 0755 "$ASSEMBLY_DIR/codex-headless" "$PKG_ROOT/usr/local/bin/codex-headless"
 find "$PKG_ROOT" -name "._*" -type f -delete
-if command -v xattr >/dev/null 2>&1; then
-  xattr -dr com.apple.provenance "$PKG_ROOT" 2>/dev/null || true
-  xattr -cr "$PKG_ROOT"
-fi
+xattr -cr "$PKG_ROOT" 2>/dev/null || true
 
 pkgbuild \
   --root "$PKG_ROOT" \
@@ -82,6 +92,9 @@ pkgbuild \
   --version "$VERSION" \
   --install-location "/" \
   --ownership recommended \
-  "$PKG_OUTPUT"
+  "$PKG_TEMP_OUTPUT"
+install -m 0644 "$PKG_TEMP_OUTPUT" "$PKG_OUTPUT"
 
+echo "Built app bundle: $APP_BUNDLE"
+echo "Built CLI: $ASSEMBLY_DIR/codex-headless"
 echo "Built unsigned package: $PKG_OUTPUT"

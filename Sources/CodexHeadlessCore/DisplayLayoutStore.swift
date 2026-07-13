@@ -110,9 +110,7 @@ public final class DisplayLayoutStore {
         if let snapshot = collection.snapshotsByProfile.values.sorted(by: { $0.createdAt > $1.createdAt }).first {
             return snapshot
         }
-        throw NSError(domain: "CodexHeadless.DisplayLayout", code: 1, userInfo: [
-            NSLocalizedDescriptionKey: "No display layout snapshot is available."
-        ])
+        throw CodexHeadlessError.displayLayout(message: "No display layout snapshot is available.")
     }
 
     public func loadMatching(displays: [DisplayInfo]) throws -> DisplayLayoutSnapshot {
@@ -150,9 +148,7 @@ public final class DisplayLayoutStore {
         if let snapshot = collection.snapshotsByProfile.values.sorted(by: { $0.createdAt > $1.createdAt }).first {
             return snapshot
         }
-        throw NSError(domain: "CodexHeadless.DisplayLayout", code: 2, userInfo: [
-            NSLocalizedDescriptionKey: "No display layout snapshot is available in the selected file."
-        ])
+        throw CodexHeadlessError.displayLayout(message: "No display layout snapshot is available in the selected file.")
     }
 
     public func loadCollection() throws -> DisplayLayoutSnapshotCollection {
@@ -176,7 +172,7 @@ public final class DisplayLayoutStore {
     }
 
     public func saveCurrentLayout(
-        displayManager: DisplayManager,
+        displayManager: DisplayManaging,
         reason: String,
         includeManagedVirtual: Bool = false
     ) {

@@ -26,13 +26,19 @@ public struct TouchBarChangeResult {
 public final class TouchBarManager {
     private let logger: CHLogger
     private let bridge: TouchBarPrivateBridge
+    private let recoveryJournalStore: RecoveryJournalStoring
+    private let capabilityStore: HelperCapabilityStore
 
     public init(
         logger: CHLogger = CHLogger(),
-        bridge: TouchBarPrivateBridge = .shared
+        bridge: TouchBarPrivateBridge = .shared,
+        recoveryJournalStore: RecoveryJournalStoring = RecoveryJournalStore(),
+        capabilityStore: HelperCapabilityStore? = nil
     ) {
         self.logger = logger
         self.bridge = bridge
+        self.recoveryJournalStore = recoveryJournalStore
+        self.capabilityStore = capabilityStore ?? HelperCapabilityStore(journalStore: recoveryJournalStore)
     }
 
     public func hideIfEnabled(_ enabled: Bool) -> TouchBarChangeResult {
@@ -57,10 +63,20 @@ public final class TouchBarManager {
         }
 
         do {
+            let operationID = (try recoveryJournalStore.read()?.operationID)
+                ?? "standalone-touchbar-\(UUID().uuidString.lowercased())"
+            let capability = try capabilityStore.reserve(
+                kind: .touchBarApply,
+                operationID: operationID,
+                expectedExecutablePath: helperPath
+            )
             let result = try Shell.run(helperPath, [
-                "__touchbar-apply",
+                "internal-helper",
+                InternalHelperKind.touchBarApply.rawValue,
+                capability.capabilityID,
+                capability.nonce,
+                capability.operationID,
                 action.rawValue,
-                "--variant",
                 variant.rawValue
             ], timeoutSeconds: 5)
             let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)

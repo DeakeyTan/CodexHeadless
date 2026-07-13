@@ -2,23 +2,24 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/version.sh"
 RELEASE_DIR="${CODEX_HEADLESS_RELEASE_DIR:-$ROOT_DIR/.build/release}"
 APP_EXECUTABLE_SOURCE="$RELEASE_DIR/CodexHeadless"
 CLI_EXECUTABLE_SOURCE="$RELEASE_DIR/codex-headless"
 APP_BUNDLE_SOURCE="${CODEX_HEADLESS_APP_BUNDLE_PATH:-$RELEASE_DIR/CodexHeadless.app}"
 ICON_SOURCE="$ROOT_DIR/icon.png"
 MIN_MACOS_VERSION="${CODEX_HEADLESS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-13.0}}"
-APP_VERSION="${CODEX_HEADLESS_VERSION:-0.5}"
+APP_VERSION="$(codex_headless_version)"
 
 if [[ ! -x "$APP_EXECUTABLE_SOURCE" ]]; then
   echo "Missing release executable: $APP_EXECUTABLE_SOURCE" >&2
-  echo "Run: swift build --build-system native -c release" >&2
+  echo "Run: swift build -c release" >&2
   exit 1
 fi
 
 if [[ ! -x "$CLI_EXECUTABLE_SOURCE" ]]; then
   echo "Missing release helper executable: $CLI_EXECUTABLE_SOURCE" >&2
-  echo "Run: swift build --build-system native -c release" >&2
+  echo "Run: swift build -c release" >&2
   exit 1
 fi
 

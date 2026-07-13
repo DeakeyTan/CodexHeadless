@@ -151,7 +151,7 @@ public final class TouchBarPrivateBridge {
 
         warnings.append("Touch Bar hiding uses private macOS APIs and may break after macOS updates.")
         warnings.append("Hide My Bar's public README confirms this class of feature relies on private APIs.")
-        warnings.append("The v0.5 default hide path clears Control Strip UI via defaults and restores it from backup on `off`.")
+        warnings.append("The experimental hide path clears Control Strip UI via defaults and restores it from backup on `off`.")
 
         return TouchBarSafetyReport(allowed: allowed, reasons: reasons, warnings: warnings)
     }

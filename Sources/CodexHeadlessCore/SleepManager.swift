@@ -2,209 +2,443 @@ import Darwin
 import Foundation
 import IOKit.pwr_mgt
 
-public enum KeepAwakeProcessKind {
+public enum KeepAwakeProcessKind: String {
     case app
     case cli
 }
 
 public final class SleepManager {
     private let logger: CHLogger
-    private let stateStore: StateStore
-    private let configManager: ConfigManager
+    private let stateStore: RuntimeStateStoring
+    private let configManager: ConfigManaging
     private let processKind: KeepAwakeProcessKind
-    private var nativeAssertionID: IOPMAssertionID?
-    private var sudoPMSetAvailable: Bool?
+    private let processInspector: ManagedProcessInspecting
+    private let recoveryJournalStore: RecoveryJournalStoring
+    private let capabilityStore: HelperCapabilityStore
+    private let failureInjector: ManagedResourceFailureInjecting
+    private let clock: WorkflowClock
+    private let snapshotProvider: ManagedProcessSnapshotProviding
 
     public init(
         logger: CHLogger = CHLogger(),
-        stateStore: StateStore = StateStore(),
-        configManager: ConfigManager = ConfigManager(),
-        processKind: KeepAwakeProcessKind = .cli
+        stateStore: RuntimeStateStoring = StateStore(),
+        configManager: ConfigManaging = ConfigManager(),
+        processKind: KeepAwakeProcessKind = .cli,
+        processInspector: ManagedProcessInspecting = ManagedProcessInspector(),
+        recoveryJournalStore: RecoveryJournalStoring = RecoveryJournalStore(),
+        capabilityStore: HelperCapabilityStore? = nil,
+        failureInjector: ManagedResourceFailureInjecting = NoopManagedResourceFailureInjector(),
+        clock: WorkflowClock = SystemWorkflowClock(),
+        snapshotProvider: ManagedProcessSnapshotProviding = ManagedProcessSnapshotProvider()
     ) {
         self.logger = logger
         self.stateStore = stateStore
         self.configManager = configManager
         self.processKind = processKind
+        self.processInspector = processInspector
+        self.recoveryJournalStore = recoveryJournalStore
+        self.capabilityStore = capabilityStore ?? HelperCapabilityStore(journalStore: recoveryJournalStore)
+        self.failureInjector = failureInjector
+        self.clock = clock
+        self.snapshotProvider = snapshotProvider
     }
 
     public func enableKeepAwake() throws {
-        let requestedBackend = configManager.load().keepAwakeBackend ?? .caffeinate
-        let effectiveBackend = effectiveBackend(for: requestedBackend)
-
-        if requestedBackend == .native, effectiveBackend == .caffeinate {
-            logger.warn("Native Keep Awake was requested from CLI; falling back to caffeinate because CLI assertions do not persist after process exit.")
+        let started = clock.uptime
+        defer { logger.info("[Perf] keep-awake-start durationMs=\(Int((clock.uptime - started) * 1000))") }
+        let requested = try configManager.read().keepAwakeBackend ?? .caffeinate
+        let backend: KeepAwakeBackend = .caffeinate
+        if requested == .native {
+            logger.warn("Native Keep Awake is not used by Headless Mode; migrated to managed caffeinate for cross-process recovery.")
         }
-
-        switch effectiveBackend {
-        case .native:
-            try enableNativeKeepAwake()
-        case .caffeinate:
-            try enableCaffeinateKeepAwake()
-        }
-
-        applyPMSetForKeepAwake()
-    }
-
-    private func enableCaffeinateKeepAwake() throws {
-        var state = stateStore.load()
-        if let pid = state.caffeinatePID, processIsRunning(pid) {
-            logger.info("Keep Awake already running with caffeinate PID \(pid).")
-        } else {
-            let pid = try startCaffeinate()
-            state.caffeinatePID = pid
-            logger.info("Started caffeinate with PID \(pid).")
-        }
-
-        state.keepAwake = true
-        state.keepAwakeBackend = KeepAwakeBackend.caffeinate.rawValue
-        try stateStore.save(state)
-    }
-
-    private func enableNativeKeepAwake() throws {
-        var state = stateStore.load()
-        if nativeAssertionID == nil {
-            var assertionID = IOPMAssertionID(0)
-            let result = IOPMAssertionCreateWithName(
-                kIOPMAssertionTypeNoIdleSleep as CFString,
-                IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                "CodexHeadless Keep Awake" as CFString,
-                &assertionID
-            )
-
-            guard result == kIOReturnSuccess else {
-                throw NSError(domain: "CodexHeadless.Sleep", code: Int(result), userInfo: [
-                    NSLocalizedDescriptionKey: "Failed to create native Keep Awake power assertion."
-                ])
+        let current = try stateStore.read()
+        if current.keepAwake,
+           current.keepAwakeBackend != nil,
+           current.keepAwakeBackend != backend.rawValue {
+            let cleanup = disableKeepAwake()
+            guard cleanup.completed else {
+                throw CodexHeadlessError.managedResource(
+                    message: "Cannot switch Keep Awake backend because existing cleanup \(cleanup.summary)."
+                )
             }
-
-            nativeAssertionID = assertionID
-            logger.info("Created native Keep Awake assertion: \(assertionID).")
-        } else {
-            logger.info("Native Keep Awake assertion already active: \(nativeAssertionID ?? 0).")
         }
-
-        if let pid = state.caffeinatePID, processIsRunning(pid) {
-            kill(pid, SIGTERM)
-            logger.info("Stopped managed caffeinate PID \(pid) after switching to native Keep Awake.")
+        switch backend {
+        case .caffeinate: try enableCaffeinate()
+        case .native: break
         }
-
-        state.keepAwake = true
-        state.caffeinatePID = nil
-        state.keepAwakeBackend = KeepAwakeBackend.native.rawValue
-        try stateStore.save(state)
     }
 
-    public func disableKeepAwake() {
-        var state = stateStore.load()
-        releaseNativeAssertionIfNeeded()
-
-        if let pid = state.caffeinatePID {
-            if processIsRunning(pid) {
-                kill(pid, SIGTERM)
-                logger.info("Stopped managed caffeinate PID \(pid).")
-            }
-            state.caffeinatePID = nil
-        }
-
-        state.keepAwake = false
-        state.keepAwakeBackend = nil
+    public func disableKeepAwake() -> ManagedResourceCleanupResult {
+        let started = clock.uptime
+        defer { logger.info("[Perf] keep-awake-stop durationMs=\(Int((clock.uptime - started) * 1000))") }
+        let state: RuntimeState
         do {
-            try stateStore.save(state)
+            state = try stateStore.read()
         } catch {
-            logger.error("Failed to save state while disabling Keep Awake: \(error.localizedDescription)")
+            return .failed(reason: "Runtime state is unavailable: \(error.localizedDescription)")
+        }
+
+        let journal: RecoveryJournal?
+        do {
+            journal = try recoveryJournalStore.read()
+        } catch {
+            return .failed(reason: "Recovery Journal is unavailable: \(error.localizedDescription)")
+        }
+        let cleanup: ManagedResourceCleanupResult
+        do {
+            try failureInjector.check(.beforeCleanup, resourceKind: "keep-awake")
+        } catch {
+            return .failed(reason: error.localizedDescription)
+        }
+        if state.keepAwakeBackend == KeepAwakeBackend.native.rawValue {
+            return .ownershipMismatch(reason: "Legacy Native assertion cannot be released or verified by this v0.9.x workflow. Quit its owner process, then retry Restore.")
+        } else if let record = journal?.keepAwakeHost ?? state.keepAwakeHost, let pid = record.pid {
+            guard trustedRecordMatchesState(record, state: state) else {
+                return .ownershipMismatch(reason: "Recovery journal does not independently verify Keep Awake instance \(record.instanceID).")
+            }
+            cleanup = processInspector.terminate(identity(for: record, pid: pid), timeoutSeconds: 1.5)
+        } else if state.caffeinatePID != nil
+                    || (journal?.keepAwakeResource != nil && journal?.keepAwakeResource?.stage != .cleaned) {
+            cleanup = .ownershipMismatch(reason: "Legacy caffeinate PID has no instance ownership record.")
+        } else {
+            cleanup = .alreadyStopped
+        }
+
+        guard cleanup.completed else {
+            logger.error("Keep Awake cleanup \(cleanup.summary); state remains On for recovery.")
+            return cleanup
+        }
+        do {
+            try failureInjector.check(.afterTerminateRequest, resourceKind: "keep-awake")
+        } catch {
+            return .failed(reason: error.localizedDescription)
+        }
+        if let pid = (journal?.keepAwakeHost ?? state.keepAwakeHost)?.pid,
+           processInspector.isRunning(pid: pid) {
+            return .failed(reason: "Keep Awake assertion holder PID \(pid) is still running after cleanup.")
+        }
+        do {
+            try failureInjector.check(.afterResourceDisappearCheck, resourceKind: "keep-awake")
+        } catch {
+            return .failed(reason: error.localizedDescription)
+        }
+        do {
+            try stateStore.transaction { runtime in
+                runtime.keepAwake = false
+                runtime.caffeinatePID = nil
+                runtime.keepAwakeBackend = nil
+                runtime.keepAwakeHost = nil
+            }
+            if journal != nil {
+                try recoveryJournalStore.update { journal in
+                    journal.keepAwakeHost = nil
+                    journal.keepAwakeResource?.stage = .cleaned
+                    journal.cleanupProgress.keepAwakeCleanup = .completed
+                    journal.cleanupProgress.keepAwakeHolderStop = .completed
+                    journal.cleanupProgress.keepAwakeAssertionDisappearance = .completed
+                }
+            }
+            try StandaloneJournalFinalizer(
+                stateStore: stateStore,
+                journalStore: recoveryJournalStore,
+                snapshotProvider: snapshotProvider
+            ).finalizeIfClean()
+            logger.info("Keep Awake cleanup \(cleanup.summary).")
+            return cleanup
+        } catch {
+            logger.error("Keep Awake stopped but state persistence failed: \(error.localizedDescription)")
+            return .failed(reason: "Resource stopped but state persistence failed: \(error.localizedDescription)")
         }
     }
 
     public func syncWithState() {
-        let state = stateStore.load()
-        if !state.keepAwake {
-            releaseNativeAssertionIfNeeded()
+        let state: RuntimeState
+        do {
+            state = try stateStore.read()
+        } catch {
+            logger.error("Keep Awake reconcile skipped because runtime state is unavailable: \(error.localizedDescription)")
+            return
         }
+        guard state.keepAwake else {
+            return
+        }
+
+        if state.keepAwakeBackend == KeepAwakeBackend.native.rawValue {
+            logger.warn("Legacy Native Keep Awake state requires explicit Restore before migration.")
+            return
+        }
+
+        if let record = state.keepAwakeHost, let pid = record.pid {
+            if processInspector.matches(identity(for: record, pid: pid)) { return }
+            if processInspector.isRunning(pid: pid) {
+                logger.error("Keep Awake ownership mismatch for live PID \(pid); refusing automatic replacement.")
+                return
+            }
+        }
+        logger.warn("Managed Keep Awake process is missing; restarting it.")
+        do { try enableCaffeinate(forceRestart: true) } catch { logger.error("Keep Awake self-heal failed: \(error.localizedDescription)") }
     }
 
     public func applyDisplaySleepFast() {
-        runSudoPMSet(["-a", "displaysleep", "1"])
+        // Keep Awake is process-scoped. CodexHeadless no longer mutates global pmset values.
     }
 
-    private func effectiveBackend(for backend: KeepAwakeBackend) -> KeepAwakeBackend {
-        if backend == .native, processKind == .cli {
-            return .caffeinate
-        }
-        return backend
+    public func recoveryHostRecord() -> KeepAwakeHostRecord? {
+        guard let journal = try? recoveryJournalStore.read(),
+              let record = journal.keepAwakeHost,
+              let pid = record.pid,
+              processInspector.matches(identity(for: record, pid: pid)) else { return nil }
+        return record
     }
 
-    private func releaseNativeAssertionIfNeeded() {
-        guard let assertionID = nativeAssertionID else {
-            return
-        }
-
-        let result = IOPMAssertionRelease(assertionID)
-        if result == kIOReturnSuccess {
-            logger.info("Released native Keep Awake assertion: \(assertionID).")
-        } else {
-            logger.warn("Failed to release native Keep Awake assertion \(assertionID): \(result).")
-        }
-        nativeAssertionID = nil
-    }
-
-    private func startCaffeinate() throws -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        process.arguments = ["-dimsu"]
-        try process.run()
-        return process.processIdentifier
-    }
-
-    private func applyPMSetForKeepAwake() {
-        runSudoPMSet(["-a", "sleep", "0"])
-        runSudoPMSet(["-a", "displaysleep", "1"])
-        runSudoPMSet(["-a", "disksleep", "0"])
-    }
-
-    private func runSudoPMSet(_ arguments: [String]) {
-        guard canRunSudoPMSet() else {
-            logger.warn("pmset \(arguments.joined(separator: " ")) skipped: sudo credentials are not cached. Run with sudo once or ignore; caffeinate remains active.")
-            return
-        }
-
+    public func managedResourceObservation(snapshot suppliedSnapshot: ManagedProcessSnapshot? = nil) -> ManagedResourceObservation {
         do {
-            let result = try Shell.run("/usr/bin/sudo", ["-n", "/usr/bin/pmset"] + arguments, timeoutSeconds: 0.8)
-            if result.succeeded {
-                logger.info("pmset \(arguments.joined(separator: " ")) succeeded.")
-            } else {
-                let errorOutput = result.errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-                if errorOutput.contains("a password is required") || errorOutput.contains("a terminal is required") {
-                    logger.warn("pmset \(arguments.joined(separator: " ")) skipped: sudo credentials are not cached. Run with sudo once or ignore; caffeinate remains active.")
-                } else {
-                    logger.warn("pmset \(arguments.joined(separator: " ")) failed: \(errorOutput)")
+            if let journal = try recoveryJournalStore.read(), let record = journal.keepAwakeHost, let pid = record.pid {
+                if processInspector.matches(identity(for: record, pid: pid)) {
+                    return .init(status: .verifiedOwned, summary: "IOPM assertion holder identity matches Recovery Journal", pid: pid)
+                }
+                if processInspector.isRunning(pid: pid) {
+                    return .init(status: .unknown, summary: "recorded Keep Awake PID is running with mismatched ownership", pid: pid)
                 }
             }
         } catch {
-            logger.warn("Unable to run pmset \(arguments.joined(separator: " ")): \(error.localizedDescription)")
+            return .init(status: .unknown, summary: "Recovery Journal cannot be read: \(error.localizedDescription)")
+        }
+        let snapshot = suppliedSnapshot ?? snapshotProvider.capture()
+        guard snapshot.succeeded else {
+            return .init(status: .unknown, summary: snapshot.error ?? "process snapshot unavailable")
+        }
+        switch HelperProcessCandidateDetector.verify(
+            snapshot: snapshot, kind: .keepAwakeHost, inspector: processInspector
+        ) {
+        case .verified(let pid):
+            return .init(status: .possibleOwned, summary: "an authorized-helper-shaped Keep Awake process is present without verified ownership", pid: pid)
+        case .unknown(let pid, let reason):
+            return .init(status: .unknown, summary: reason, pid: pid)
+        case .none:
+            return .none
         }
     }
 
-    private func canRunSudoPMSet() -> Bool {
-        if let sudoPMSetAvailable {
-            return sudoPMSetAvailable
+    private func enableCaffeinate(forceRestart: Bool = false) throws {
+        let current = try stateStore.read()
+        if !forceRestart,
+           let record = current.keepAwakeHost,
+           let pid = record.pid,
+           record.backend == .caffeinate,
+           processInspector.matches(identity(for: record, pid: pid)) {
+            logger.info("Managed Keep Awake is already active: PID \(pid), instance=\(record.instanceID).")
+            return
+        }
+        if let record = current.keepAwakeHost,
+           let pid = record.pid,
+           processInspector.isRunning(pid: pid),
+           !processInspector.matches(identity(for: record, pid: pid)) {
+            throw CodexHeadlessError.managedResource(
+                message: "Refusing to replace live Keep Awake PID \(pid) because ownership does not match."
+            )
         }
 
+        let instanceID = UUID().uuidString.lowercased()
+        try failureInjector.check(.beforeIntentJournal, resourceKind: "keep-awake")
+        let helperPath = HelperExecutableResolver.resolveCodexHeadless()
+            ?? CommandLine.arguments.first
+            ?? "codex-headless"
+        let operationID: String
+        if let journal = try recoveryJournalStore.read() {
+            operationID = journal.operationID
+        } else {
+            operationID = "standalone-keep-awake-\(instanceID)"
+            _ = try recoveryJournalStore.create(operationID: operationID)
+        }
+        try recoveryJournalStore.update { journal in
+            journal.keepAwakeResource = ManagedResourceJournalRecord(
+                instanceID: instanceID,
+                resourceKind: "keep-awake",
+                operationID: operationID,
+                stage: .intent
+            )
+        }
+        try failureInjector.check(.afterIntentJournal, resourceKind: "keep-awake")
+        let capability = try capabilityStore.reserve(
+            kind: .keepAwakeHost,
+            operationID: operationID,
+            expectedExecutablePath: helperPath
+        )
+        let process = Process()
+        let output = Pipe()
+        let outputCollector = KeepAwakeOutputCollector()
+        output.fileHandleForReading.readabilityHandler = { handle in
+            outputCollector.append(handle.availableData)
+        }
+        process.standardOutput = output
+        process.standardError = output
+        process.executableURL = URL(fileURLWithPath: helperPath)
+        process.arguments = [
+            "internal-helper",
+            InternalHelperKind.keepAwakeHost.rawValue,
+            capability.capabilityID,
+            capability.nonce,
+            capability.operationID,
+            instanceID
+        ]
+        try process.run()
         do {
-            let result = try Shell.run("/usr/bin/sudo", ["-n", "-v"], timeoutSeconds: 0.5)
-            let available = result.succeeded
-            sudoPMSetAvailable = available
-            if !available {
-                logger.warn("pmset changes will be skipped: sudo credentials are not cached.")
-            }
-            return available
+            try failureInjector.check(.afterProcessStart, resourceKind: "keep-awake")
         } catch {
-            sudoPMSetAvailable = false
-            logger.warn("pmset changes will be skipped: sudo credential check failed: \(error.localizedDescription)")
-            return false
+            process.terminate()
+            let deadline = clock.uptime + 1
+            while process.isRunning && clock.uptime < deadline { clock.sleep(seconds: 0.02) }
+            try? recoveryJournalStore.update {
+                $0.keepAwakeResource?.stage = process.isRunning ? .cleanupPending : .cleaned
+            }
+            guard !process.isRunning else {
+                throw CodexHeadlessError.managedResource(message: "Keep Awake start failed and holder cleanup is unconfirmed. Recovery Journal was preserved.")
+            }
+            throw error
+        }
+        try recoveryJournalStore.update { $0.keepAwakeResource?.stage = .started }
+        let ownershipDeadline = clock.uptime + 1.5
+        var processFacts = processInspector.facts(pid: process.processIdentifier)
+        while (processFacts?.processStartTime == nil
+                || processFacts?.executableFileIdentity == nil
+                || !outputCollector.contains("assertion-created")),
+              clock.uptime < ownershipDeadline {
+            clock.sleep(seconds: 0.02)
+            processFacts = processInspector.facts(pid: process.processIdentifier)
+        }
+        guard let processFacts,
+              processFacts.processStartTime != nil,
+              processFacts.executableFileIdentity != nil,
+              process.isRunning,
+              outputCollector.contains("assertion-created") else {
+            process.terminate()
+            let cleanupDeadline = clock.uptime + 1
+            while process.isRunning && clock.uptime < cleanupDeadline { clock.sleep(seconds: 0.02) }
+            try recoveryJournalStore.update { journal in
+                journal.keepAwakeResource?.stage = process.isRunning ? .cleanupPending : .cleaned
+            }
+            throw CodexHeadlessError.keepAwakeOwnership(
+                message: "Could not verify that the Keep Awake helper created its IOPM assertion."
+            )
+        }
+        var runtimeCommitted = false
+        let createdAt = clock.now
+        let record = KeepAwakeHostRecord(
+            instanceID: instanceID,
+            pid: process.processIdentifier,
+            backend: .caffeinate,
+            executablePath: helperPath,
+            startedAt: createdAt,
+            ownerProcessKind: processKind.rawValue,
+            ownership: ManagedProcessOwnershipRecord(
+                instanceID: instanceID,
+                pid: process.processIdentifier,
+                executableCanonicalPath: processFacts.executableCanonicalPath,
+                executableFileIdentity: processFacts.executableFileIdentity,
+                processStartTime: processFacts.processStartTime,
+                expectedCommandFragments: ["internal-helper", InternalHelperKind.keepAwakeHost.rawValue, capability.capabilityID, instanceID],
+                ownerOperationID: operationID,
+                resourceKind: "keep-awake",
+                createdAt: createdAt
+            ),
+            assertionKind: "PreventUserIdleSystemSleep"
+        )
+        do {
+            try failureInjector.check(.afterOwnershipObservation, resourceKind: "keep-awake")
+            try recoveryJournalStore.update { journal in
+                journal.keepAwakeHost = record
+                journal.keepAwakeResource?.ownership = record.ownership
+                journal.keepAwakeResource?.stage = .observed
+                journal.stage = .keepAwakeStarted
+            }
+            try failureInjector.check(.afterObservedJournal, resourceKind: "keep-awake")
+            try failureInjector.check(.beforeRuntimeCommit, resourceKind: "keep-awake")
+            try stateStore.transaction { state in
+                state.keepAwake = true
+                state.caffeinatePID = process.processIdentifier
+                state.keepAwakeBackend = KeepAwakeBackend.caffeinate.rawValue
+                state.keepAwakeHost = record
+            }
+            runtimeCommitted = true
+            try failureInjector.check(.afterRuntimeCommit, resourceKind: "keep-awake")
+            try recoveryJournalStore.update { $0.keepAwakeResource?.stage = .committed }
+        } catch {
+            let cleanup = processInspector.terminate(identity(for: record, pid: process.processIdentifier), timeoutSeconds: 1)
+            try compensateFailedStart(record: record, runtimeCommitted: runtimeCommitted, cleanup: cleanup)
+            throw error
+        }
+        logger.info("Started managed Keep Awake PID \(process.processIdentifier), instance=\(instanceID).")
+    }
+
+    private func identity(for record: KeepAwakeHostRecord, pid: Int32) -> ManagedProcessIdentity {
+        ManagedProcessIdentity(
+            pid: pid,
+            executablePath: record.executablePath ?? "codex-headless",
+            requiredCommandFragments: record.ownership?.expectedCommandFragments
+                ?? ["internal-helper", InternalHelperKind.keepAwakeHost.rawValue, record.instanceID],
+            expectedStartTime: record.ownership?.processStartTime,
+            expectedExecutableFileIdentity: record.ownership?.executableFileIdentity
+        )
+    }
+
+    func compensateFailedStart(
+        record: KeepAwakeHostRecord,
+        runtimeCommitted: Bool,
+        cleanup: ManagedResourceCleanupResult
+    ) throws {
+        guard cleanup.completed else {
+            try? recoveryJournalStore.update { $0.keepAwakeResource?.stage = .cleanupPending }
+            throw CodexHeadlessError.managedResource(
+                message: "Keep Awake commit failed and holder cleanup is unconfirmed: \(cleanup.summary). Recovery Journal was preserved."
+            )
+        }
+        if runtimeCommitted {
+            do {
+                try stateStore.transaction { runtime in
+                    runtime.keepAwake = false
+                    runtime.caffeinatePID = nil
+                    runtime.keepAwakeBackend = nil
+                    runtime.keepAwakeHost = nil
+                }
+            } catch let compensationError {
+                try? recoveryJournalStore.update { $0.keepAwakeResource?.stage = .cleanupPending }
+                throw CodexHeadlessError.managedResource(
+                    message: "Keep Awake stopped, but RuntimeState compensation failed: \(compensationError.localizedDescription). Recovery Journal ownership was preserved."
+                )
+            }
+        }
+        try recoveryJournalStore.update { journal in
+            journal.keepAwakeResource?.stage = .cleaned
+            journal.keepAwakeHost = nil
         }
     }
 
-    private func processIsRunning(_ pid: Int32) -> Bool {
-        kill(pid, 0) == 0
+    private func trustedRecordMatchesState(_ record: KeepAwakeHostRecord, state: RuntimeState) -> Bool {
+        guard record.ownership != nil else { return false }
+        guard let journal = try? recoveryJournalStore.read(),
+              let trusted = journal.keepAwakeHost,
+              let stateRecord = state.keepAwakeHost else { return false }
+        return trusted.instanceID == record.instanceID
+            && trusted.pid == record.pid
+            && trusted.ownership == record.ownership
+            && stateRecord.instanceID == record.instanceID
+            && stateRecord.pid == record.pid
+            && stateRecord.ownership == record.ownership
+            && journal.keepAwakeResource?.operationID == record.ownership?.ownerOperationID
+    }
+
+}
+
+private final class KeepAwakeOutputCollector {
+    private let lock = NSLock()
+    private var text = ""
+    func append(_ data: Data) {
+        guard let value = String(data: data, encoding: .utf8) else { return }
+        lock.lock(); text += value; lock.unlock()
+    }
+    func contains(_ value: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return text.contains(value)
     }
 }

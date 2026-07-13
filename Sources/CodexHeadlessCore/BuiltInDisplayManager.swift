@@ -1,6 +1,10 @@
 import Foundation
-import IOKit
-import IOKit.graphics
+
+public struct BrightnessCapability: Equatable {
+    public var available: Bool
+    public var method: String?
+    public var guidance: String
+}
 
 public struct BrightnessChangeResult {
     public var success: Bool
@@ -38,162 +42,47 @@ public struct SoftDisconnectResult {
 public final class BuiltInDisplayManager {
     private let logger: CHLogger
     private let coreDisplayBridge: CoreDisplayPrivateBridge
+    private let recoveryJournalStore: RecoveryJournalStoring
+    private let capabilityStore: HelperCapabilityStore
 
     public init(
         logger: CHLogger = CHLogger(),
-        coreDisplayBridge: CoreDisplayPrivateBridge = .shared
+        coreDisplayBridge: CoreDisplayPrivateBridge = .shared,
+        recoveryJournalStore: RecoveryJournalStoring = RecoveryJournalStore(),
+        capabilityStore: HelperCapabilityStore? = nil
     ) {
         self.logger = logger
         self.coreDisplayBridge = coreDisplayBridge
+        self.recoveryJournalStore = recoveryJournalStore
+        self.capabilityStore = capabilityStore ?? HelperCapabilityStore(journalStore: recoveryJournalStore)
     }
 
     public func currentBrightness() -> Float? {
-        var serviceIterator: io_iterator_t = 0
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &serviceIterator)
-        guard result == KERN_SUCCESS else {
-            logger.warn("Unable to query display services for brightness.")
-            return nil
-        }
-        defer { IOObjectRelease(serviceIterator) }
-
-        var service = IOIteratorNext(serviceIterator)
-        while service != 0 {
-            defer { service = IOIteratorNext(serviceIterator) }
-            var brightness: Float = 0
-            let err = IODisplayGetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, &brightness)
-            IOObjectRelease(service)
-            if err == KERN_SUCCESS {
-                return brightness
-            }
-        }
-
+        // IODisplayConnect does not expose a reliable CoreGraphics display-ID
+        // mapping on all supported macOS versions. Do not read an arbitrary
+        // external display and record it as the built-in brightness.
         return nil
     }
 
-    @discardableResult
-    public func setBrightness(_ brightness: Float) -> Bool {
-        setBrightnessUsingIOKit(brightness)
+    public func brightnessCapability() -> BrightnessCapability {
+        return BrightnessCapability(
+            available: false,
+            method: nil,
+            guidance: "Reliable built-in brightness readback is unavailable. CodexHeadless will not use an irreversible keyboard-brightness fallback."
+        )
     }
 
     public func dimBuiltInDisplay() -> BrightnessChangeResult {
-        let target: Float = 0
-
-        if setBrightnessUsingIOKit(target) {
-            return .succeeded(method: "iokit", message: "Built-in display brightness set to 0 via IOKit.")
-        }
-
-        if setBrightnessUsingBrightnessTool(target) {
-            return .succeeded(method: "brightness-tool", message: "Built-in display brightness set to 0 via brightness command.")
-        }
-
-        if pressBrightnessKey(keyCode: 145, repeatCount: 32, label: "brightness down") {
-            return .succeeded(method: "applescript-keycode", message: "Brightness down key sent via AppleScript fallback.")
-        }
-
-        return .failed("Built-in display brightness fallback failed. IOKit, brightness command, and AppleScript key events were unavailable.")
+        .failed("Brightness fallback is disabled because the original built-in brightness cannot be read and restored with verified readback.")
     }
 
     @discardableResult
     public func restoreBrightness(_ brightness: Float?) -> BrightnessChangeResult {
-        let target = max(0.1, min(1, brightness ?? 0.7))
-
-        if setBrightnessUsingIOKit(target) {
-            return .succeeded(method: "iokit", message: "Built-in display brightness restored via IOKit.")
+        guard let brightness else {
+            return .failed("Original built-in brightness was unknown. Adjust brightness manually if needed; CodexHeadless did not apply a guessed value.")
         }
-
-        if setBrightnessUsingBrightnessTool(target) {
-            return .succeeded(method: "brightness-tool", message: "Built-in display brightness restored via brightness command.")
-        }
-
-        let steps = max(4, min(16, Int((target * 16).rounded())))
-        if pressBrightnessKey(keyCode: 144, repeatCount: steps, label: "brightness up") {
-            return .succeeded(method: "applescript-keycode", message: "Brightness up key sent via AppleScript fallback.")
-        }
-
-        return .failed("Built-in display brightness restore failed. You may need to adjust brightness manually.")
-    }
-
-    private func setBrightnessUsingIOKit(_ brightness: Float) -> Bool {
-        let clamped = max(0, min(1, brightness))
-        var serviceIterator: io_iterator_t = 0
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &serviceIterator)
-        guard result == KERN_SUCCESS else {
-            logger.warn("Unable to query display services to set brightness.")
-            return false
-        }
-        defer { IOObjectRelease(serviceIterator) }
-
-        var changed = false
-        var service = IOIteratorNext(serviceIterator)
-        while service != 0 {
-            let err = IODisplaySetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, clamped)
-            if err == KERN_SUCCESS {
-                changed = true
-            }
-            IOObjectRelease(service)
-            service = IOIteratorNext(serviceIterator)
-        }
-
-        if changed {
-            logger.info("Set built-in display brightness to \(clamped).")
-        } else {
-            logger.warn("No brightness-capable display service accepted brightness change.")
-        }
-        return changed
-    }
-
-    private func setBrightnessUsingBrightnessTool(_ brightness: Float) -> Bool {
-        let clamped = max(0, min(1, brightness))
-        let candidates = [
-            "/opt/homebrew/bin/brightness",
-            "/usr/local/bin/brightness"
-        ]
-
-        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            logger.warn("brightness command not found at /opt/homebrew/bin/brightness or /usr/local/bin/brightness.")
-            return false
-        }
-
-        do {
-            let value = String(format: "%.2f", clamped)
-            let result = try Shell.run(executable, [value], timeoutSeconds: 2)
-            if result.succeeded {
-                logger.info("Set display brightness to \(value) using \(executable).")
-                return true
-            }
-
-            logger.warn("brightness command failed: \(result.errorOutput.trimmingCharacters(in: .whitespacesAndNewlines))")
-            return false
-        } catch {
-            logger.warn("Unable to run brightness command: \(error.localizedDescription)")
-            return false
-        }
-    }
-
-    private func pressBrightnessKey(keyCode: Int, repeatCount: Int, label: String) -> Bool {
-        let script = """
-        tell application "System Events"
-          repeat \(repeatCount) times
-            key code \(keyCode)
-            delay 0.02
-          end repeat
-        end tell
-        """
-
-        do {
-            let result = try Shell.run("/usr/bin/osascript", ["-e", script], timeoutSeconds: 4)
-            if result.succeeded {
-                logger.info("Sent \(repeatCount) \(label) key events via AppleScript.")
-                return true
-            }
-
-            let detail = result.errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.warn("AppleScript \(label) fallback failed: \(detail)")
-            return false
-        } catch {
-            logger.warn("Unable to run AppleScript \(label) fallback: \(error.localizedDescription)")
-            return false
-        }
+        _ = brightness
+        return .failed("Verified built-in brightness restore is unavailable. Replacement display and Keep Awake must remain active until the display is made visible manually.")
     }
 
     public func attemptSoftDisconnectIfSafe(
@@ -207,7 +96,7 @@ public final class BuiltInDisplayManager {
         }
 
         guard enabled else {
-            logger.info("Experimental built-in display soft-disconnect is disabled; using brightness fallback.")
+            logger.info("Experimental built-in display soft-disconnect is disabled; irreversible brightness fallback is unavailable.")
             return .failed("Soft-disconnect is disabled.")
         }
 
@@ -219,13 +108,13 @@ public final class BuiltInDisplayManager {
         let probe = coreDisplayBridge.probe()
         let skyLightReady = probe.mainConnectionAvailable && probe.configureDisplayEnabledAvailable
         guard probe.setUserDisabledAvailable || skyLightReady else {
-            logger.warn("CoreDisplay/SkyLight soft-disconnect symbols are unavailable; using brightness fallback.")
+            logger.warn("CoreDisplay/SkyLight soft-disconnect symbols are unavailable; irreversible brightness fallback is disabled.")
             return .failed("CoreDisplay/SkyLight soft-disconnect symbols are unavailable.")
         }
 
         if let helperResult = runSoftDisconnectHelper(displayID: builtInDisplayID, disabled: true) {
             if helperResult.success {
-                logger.info(helperResult.message)
+                logger.info("[Helper] built-in-disable displayID=\(builtInDisplayID) method=\(helperResult.method) result=success")
                 return helperResult
             }
 
@@ -233,7 +122,7 @@ public final class BuiltInDisplayManager {
             return helperResult
         }
 
-        logger.warn("No codex-headless helper executable was available for isolated soft-disconnect; using brightness fallback.")
+        logger.warn("No codex-headless helper executable was available for isolated soft-disconnect; irreversible brightness fallback is disabled.")
         return .failed("No codex-headless helper executable was available for isolated soft-disconnect.")
     }
 
@@ -253,7 +142,7 @@ public final class BuiltInDisplayManager {
 
         if let helperResult = runSoftDisconnectHelper(displayID: displayID, disabled: false) {
             if helperResult.success {
-                logger.info(helperResult.message)
+                logger.info("[Helper] built-in-enable displayID=\(displayID) method=\(helperResult.method) result=success")
                 return helperResult
             }
 
@@ -272,7 +161,23 @@ public final class BuiltInDisplayManager {
 
         let action = disabled ? "disable" : "enable"
         do {
-            let result = try Shell.run(helperPath, ["__soft-disconnect-apply", String(displayID), action], timeoutSeconds: 5)
+            let operationID = (try recoveryJournalStore.read()?.operationID)
+                ?? "standalone-soft-disconnect-\(UUID().uuidString.lowercased())"
+            let capability = try capabilityStore.reserve(
+                kind: .softDisconnectApply,
+                operationID: operationID,
+                expectedExecutablePath: helperPath
+            )
+            let result = try Shell.run(helperPath, [
+                "internal-helper",
+                InternalHelperKind.softDisconnectApply.rawValue,
+                capability.capabilityID,
+                capability.nonce,
+                capability.operationID,
+                String(displayID),
+                action,
+                "default"
+            ], timeoutSeconds: 5)
             let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
             let errorOutput = result.errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             if result.succeeded {

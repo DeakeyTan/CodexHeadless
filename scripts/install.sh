@@ -17,7 +17,7 @@ else
   echo "SDKROOT: system default"
 fi
 
-swift build --build-system native -c release
+swift build -c release
 
 mkdir -p "$HOME/Library/Application Support/CodexHeadless"
 mkdir -p "$HOME/Library/Logs"

@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: macos-15
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Build and test
+        run: |
+          swift build
+          bash scripts/run_xctest_gate.sh
+      - name: Build universal release assets
+        env:
+          CODEX_HEADLESS_VERSION: ${{ github.event.release.tag_name }}
+          CODEX_HEADLESS_ARCH: universal
+        run: bash scripts/build_release_assets.sh
+      - name: Verify assets
+        run: |
+          test -d .build/dist/universal/CodexHeadless.app
+          test -x .build/dist/universal/release/codex-headless
+          test -f .build/release-assets/checksums.txt
+          pkgutil --payload-files .build/release-assets/*-unsigned.pkg >/dev/null
+          for binary in \
+            .build/dist/universal/CodexHeadless.app/Contents/MacOS/CodexHeadless \
+            .build/dist/universal/CodexHeadless.app/Contents/MacOS/codex-headless \
+            .build/dist/universal/release/codex-headless; do
+            archs="$(lipo -archs "$binary")"
+            [[ " $archs " == *" arm64 "* ]]
+            [[ " $archs " == *" x86_64 "* ]]
+          done
+          CODEX_HEADLESS_VERSION="${{ github.event.release.tag_name }}" CODEX_HEADLESS_ARCH=universal bash scripts/verify_release_assets.sh
+      - name: Upload assets to published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          gh release upload "$TAG" \
+            ".build/release-assets/CodexHeadless-$VERSION-universal.zip" \
+            ".build/release-assets/CodexHeadless-$VERSION-universal-unsigned.pkg" \
+            .build/release-assets/codex-headless \
+            .build/release-assets/checksums.txt \
+            --clobber

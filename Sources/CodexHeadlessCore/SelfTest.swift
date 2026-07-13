@@ -22,6 +22,9 @@ public enum SelfTest {
             testInteractionDefaults(),
             testKeepAwakeBackendParsing(),
             testHelperExecutableResolver(),
+            testVirtualHelperProtocol(),
+            testVirtualHelperPartialLine(),
+            testShellLargeOutput(),
             testShellTimeout(),
             testCoreDisplayProbeDoesNotCrash(),
             testVirtualDisplayProbeDoesNotCrash(),
@@ -91,7 +94,7 @@ public enum SelfTest {
     private static func testRecommendedPresets() -> SelfTestResult {
         let hasLegacyPreset = ResolutionManager.presets.contains(Resolution(width: 1920, height: 1080))
         let hasDefaultPreset = ResolutionManager.presets.contains(Resolution(width: 2560, height: 1440))
-        let defaultMatches = ResolutionManager.defaultResolution == Resolution(width: 2560, height: 1440)
+        let defaultMatches = ResolutionManager.defaultResolution == Resolution(width: 1920, height: 1080)
         let passed = hasLegacyPreset && hasDefaultPreset && defaultMatches
         return SelfTestResult(
             name: "recommended presets",
@@ -153,8 +156,7 @@ public enum SelfTest {
 
     private static func testDisplayHandoffDefaults() -> SelfTestResult {
         let handoff = DisplayHandoffConfig.default
-        let passed = handoff.keepBuiltInMainDuringPreparation
-            && handoff.onSoftDisconnectFailure == .restore
+        let passed = handoff.onSoftDisconnectFailure == .restore
         return SelfTestResult(
             name: "safe display handoff defaults",
             passed: passed,
@@ -166,7 +168,7 @@ public enum SelfTest {
         do {
             let encoded = try JSONEncoder().encode(AppConfig.default)
             guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
-                throw NSError(domain: "CodexHeadless.SelfTest", code: 1)
+                throw CodexHeadlessError.invalidConfiguration(message: "Self-test requested failure.")
             }
             object.removeValue(forKey: "confirmation")
             object.removeValue(forKey: "displayHandoff")
@@ -227,19 +229,63 @@ public enum SelfTest {
         )
     }
 
+    private static func testVirtualHelperProtocol() -> SelfTestResult {
+        let authorized = VirtualDisplayHelperProtocol.authorizedLine(
+            capabilityID: "capability", operationID: "operation", instanceID: "instance"
+        )
+        let ready = VirtualDisplayHelperProtocol.readyLine(instanceID: "instance", displayID: 42)
+        let events = VirtualDisplayHelperProtocol.parseEvents(authorized + "\n" + ready + "\n")
+        return SelfTestResult(
+            name: "virtual helper structured protocol",
+            passed: events == [
+                .authorized(kind: "virtual-display-host", capabilityID: "capability", operationID: "operation", instanceID: "instance"),
+                .ready(instanceID: "instance", displayID: 42)
+            ],
+            detail: "events=\(events.count)"
+        )
+    }
+
+    private static func testVirtualHelperPartialLine() -> SelfTestResult {
+        let authorized = VirtualDisplayHelperProtocol.authorizedLine(
+            capabilityID: "capability", operationID: "operation", instanceID: "instance"
+        )
+        let rejected = VirtualDisplayHelperProtocol.parseEvents(authorized).isEmpty
+        return SelfTestResult(
+            name: "virtual helper partial line rejection",
+            passed: rejected,
+            detail: "partialRejected=\(rejected)"
+        )
+    }
+
     private static func testShellTimeout() -> SelfTestResult {
         do {
-            let startedAt = Date()
             let result = try Shell.run("/bin/sleep", ["2"], timeoutSeconds: 0.2)
-            let elapsed = Date().timeIntervalSince(startedAt)
-            let passed = !result.succeeded && elapsed < 1.5
+            let passed = result.timedOut && !result.succeeded && result.durationMilliseconds < 1_500
             return SelfTestResult(
                 name: "shell timeout",
                 passed: passed,
-                detail: String(format: "elapsed=%.2fs, termination=%@", elapsed, result.terminationDescription)
+                detail: "durationMs=\(result.durationMilliseconds), timedOut=\(result.timedOut), termination=\(result.terminationDescription)"
             )
         } catch {
             return SelfTestResult(name: "shell timeout", passed: false, detail: error.localizedDescription)
+        }
+    }
+
+    private static func testShellLargeOutput() -> SelfTestResult {
+        do {
+            let result = try Shell.run(
+                "/bin/sh",
+                ["-c", "i=0; while [ $i -lt 20000 ]; do echo 0123456789abcdefghijklmnopqrstuvwxyz; i=$((i+1)); done"],
+                timeoutSeconds: 5
+            )
+            let passed = result.succeeded && result.output.utf8.count > 500_000 && !result.timedOut
+            return SelfTestResult(
+                name: "shell concurrent large-output drain",
+                passed: passed,
+                detail: "bytes=\(result.output.utf8.count), durationMs=\(result.durationMilliseconds), timedOut=\(result.timedOut)"
+            )
+        } catch {
+            return SelfTestResult(name: "shell concurrent large-output drain", passed: false, detail: error.localizedDescription)
         }
     }
 
